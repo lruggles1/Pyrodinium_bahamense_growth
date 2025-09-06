@@ -3,7 +3,6 @@ title: "mumax_all_experiments"
 output: html_document
 date: "2025-08-26"
 ---
-
 ```{r}
 ### install all necessary packages
 library(dplyr)
