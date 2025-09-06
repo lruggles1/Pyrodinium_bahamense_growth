@@ -559,54 +559,8 @@ ggplot(all_mumax, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
     x = "Media Treatment",
     y = expression(paste("Maximum growth rate (", mu[max], ")"))
   )
-
-
 ```
 ```{r}
 ggsave("mumax_all_experiments.png", width = 7, height = 5, dpi = 600)
-```
-
-```{r save anova results to google sheets}
-library(dplyr)
-library(googlesheets4)
-
-# Authenticate Google Sheets (you’ll need to log in once)
-gs4_auth()
-
-# Create a new Google Sheet
-sheet <- gs4_create("ANOVA_and_Tukey_results")
-
-# List of transfers to loop over
-transfers <- unique(all_mumax$Transfer)
-
-for (tr in transfers) {
-  
-  # Filter data for this transfer
-  df <- all_mumax %>% filter(Transfer == tr)
-  
-  # Run two-way ANOVA
-  fit <- aov(mumax ~ Experiment * Treatment, data = df)
-  
-  # Extract full ANOVA table
-  anova_df <- as.data.frame(anova(fit))
-  anova_df$Term <- rownames(anova_df)
-  rownames(anova_df) <- NULL
-  
-  # Write ANOVA to Google Sheet
-  sheet_write(anova_df, ss = sheet, sheet = paste0("ANOVA_T", tr))
-  
-  # Extract TukeyHSD for each factor separately
-  tukey_list <- TukeyHSD(fit)
-  
-  for (factor_name in names(tukey_list)) {
-    tukey_df <- as.data.frame(tukey_list[[factor_name]])
-    tukey_df$Comparison <- rownames(tukey_df)
-    rownames(tukey_df) <- NULL
-    
-    # Write to Google Sheet with sheet name including factor and transfer
-    sheet_write(tukey_df, ss = sheet, sheet = paste0("Tukey_", factor_name, "_T", tr))
-  }
-}
-```
 ```
 
