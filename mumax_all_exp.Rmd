@@ -3,8 +3,9 @@ title: "mumax_all_experiments"
 output: html_document
 date: "2025-08-26"
 ---
+
+# Install all necessary packages and load packages
 ```{r}
-### install all necessary packages
 library(dplyr)
 library(tidyr)
 library(ggplot2)
@@ -15,75 +16,69 @@ library(stringr)
 library(growthrates) 
 ```
 
+#Import data and calculuate mumax for low-divisity microbiome
 ```{r import low-diversity CHL data}
-fluor<-as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/1iD3GXey2Rg31hJI7V125ByjyR8TPvAD1kbDD4dR87VE/edit?usp=sharing"))
-# Remove periods and convert to numeric
-fluor$Time <- as.numeric(sub('.', '', fluor$Time))
-# Convert Date column to Date type
-fluor$Date <- ymd(fluor$Date)
+# Import
+fluor <- as.data.frame(read_csv("fluor.csv"))
+fluor$Time <- as.numeric(sub('.', '', fluor$Time)) # remove periods
+fluor$Time <- fluor$Time * 48 / 24
+fluor$Date <- mdy(fluor$Date)                       # parse dates
 
-# Function to process each treatment
-process_treatment <- function(fluor, treatment_name, levels_order) {
-  fluor_t <- fluor %>%
-    filter(Treatment == treatment_name, Round %in% 1:2) %>%
-    mutate(Treatment = factor(Treatment, levels = levels_order)) %>%
-    rename(Chl = `Chlorophyll-A (RFU)`) %>%
-    droplevels()
-  
-# group by serial transfer and media treatment 
-  fluor_t %<>% group_by(Round, Treatment) %>% filter(n() > 4) %>% ungroup() %>% droplevels()
-  
-#find max growth rate/ spar 0.7 allowed for a better representation of the -B12 treatment
-  fits <- all_splines(Chl ~ Time | Round + Treatment + Rep, data = fluor_t, spar = 0.7)
 
-# create dataframe to hold experiment name, treatment, y0, and mumax
-  df <- data.frame(
-    ID = names(fits@fits),
-    y0 = sapply(fits@fits, function(fit) fit@par["y0"]),
-    mumax = sapply(fits@fits, function(fit) fit@par["mumax"])
+# Prepare data
+fluor2 <- fluor %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  filter(Round %in% 1:2, Treatment %in% c("-Cobalamin", "Replete")) %>%
+  droplevels()
+fluor2 <- fluor2 %>% rename(Bio_Rep = Rep)
+
+# Run all_splines once for both treatments
+fits_all <- all_splines(
+  Chl ~ Time | Round + Treatment + Bio_Rep,
+  data = fluor2,
+  spar = 0.7
+)
+
+# Plot all fits together in one frame
+par(mfrow = c(4, 6))
+par(mar = c(2.5, 4, 2, 1))
+plot(fits_all)
+
+# Extract parameters into dataframe
+fluor_mumax_all <- data.frame(
+  ID    = names(fits_all@fits),
+  y0    = sapply(fits_all@fits, function(f) f@par["y0"]),
+  mumax = sapply(fits_all@fits, function(f) f@par["mumax"])
+)
+
+# Split ID into metadata
+fluor_mumax_all <- fluor_mumax_all %>%
+  tidyr::separate(ID, into = c("Round", "Treatment", "Bio_Rep"), sep = ":") %>%
+  mutate(
+    Round     = as.numeric(Round),
+    Rep       = as.numeric(Bio_Rep),
+    Treatment = factor(Treatment, levels = c("-Cobalamin", "Replete"))
   )
-  
-  df <- df %>%
-    separate(ID, into = c("Transfer_tmp", "Treatment_ID", "Bio_Rep"), sep = ":", remove = FALSE) %>%
-    mutate(
-      Bio_Rep = as.numeric(Bio_Rep),
-      Transfer = as.numeric(str_remove(Transfer_tmp, "\\.y0$")),
-      Treatment = treatment_name  # make sure Treatment column is consistent
-    ) %>%
-    select(-Transfer_tmp, -Treatment_ID)
-  
-  return(df)
-}
 
-# Define the order of treatments
-levels_order <- c("-Cobalamin", "Replete")
-
-# Process all treatments
-fluor_mumax_b12   <- process_treatment(fluor, "-Cobalamin", levels_order)
-fluor_mumax_rep   <- process_treatment(fluor, "Replete", levels_order)
-
-
-# Combine all
-fluor_mumax_all <- bind_rows(fluor_mumax_b12, fluor_mumax_rep)
-
-
+# Summarise
 fluor_summary <- fluor_mumax_all %>%
-  group_by(Treatment, Transfer) %>%
+  group_by(Treatment, Round) %>%
   summarise(
     mean_mumax = mean(mumax, na.rm = TRUE),
     se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
     .groups = "drop"
   )
 
-
-# plot maximum growt rates 
+```
+# Plot low diversity growth rates
+```{r}
 ggplot(fluor_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   
   # add error bar one standard devaition from mean 
   geom_errorbar(aes(ymin = mean_mumax - se_mumax, ymax = mean_mumax + se_mumax),
                 width = 0.2, linewidth = 0.8) +
   geom_point(size = 3, shape = 95, stroke = 1.5) +
- facet_grid(~Transfer, scales = "free_x", space = "free") +
+ facet_grid(~Round, scales = "free_x", space = "free") +
   scale_color_manual(values = c("-Cobalamin"="#102E50",
                                 "Replete"="#F5C45E",
                                 "-Thiamine"="deeppink4",
@@ -96,7 +91,7 @@ ggplot(fluor_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   )) +
   labs(
     x = "Media",
-    y = expression(paste("Maximum growth rate (", mu[max], ")"))
+    y = expression(paste("Specific growth rate (", mu, ")"))
   ) +
   theme_bw(base_size = 14) +
   theme(
@@ -114,61 +109,51 @@ ggplot(fluor_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   
   )
 ```
-
+#Import data and calculuate mu for IRL culture microbiome
 ```{r import IRL culture CHL data}
-IRLcul <- as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/152LJnHlyE7BVIg4P94l_wuC2RVi7gUhj8dogtArG-kc/edit?gid=0#gid=0"))
-# Remove periods and convert to numeric
-IRLcul$Time <- as.numeric(gsub("\\.", "", IRLcul$Time))
-# Convert Date column to Date type
-IRLcul$Date <- ymd(IRLcul$Date)
+# Import
+IRLcul <- as.data.frame(read_csv("1003_1006.csv"))
+IRLcul$Time <- as.numeric(gsub("\\.", "", IRLcul$Time))  
+IRLcul$Time <- IRLcul$Time * 48 /24
+IRLcul$Date <- mdy(IRLcul$Date)                         
 
-# Function to process each treatment
-process_treatment <- function(IRLcul, treatment_name, levels_order) {
-  IRLcul_t <- IRLcul %>%
-    filter(Treatment == treatment_name, Round %in% 1:2) %>%
-    mutate(Treatment = factor(Treatment, levels = levels_order)) %>%
-    rename(Chl = `Chlorophyll-A (RFU)`) %>%
-    droplevels()
-  
-# group by serial transfer and media treatment   
-  IRLcul_t %<>% group_by(Round, Treatment) %>% filter(n() > 4) %>% ungroup() %>% droplevels()
+# Keep consistent column names
+IRLcul2 <- IRLcul %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  filter(Round %in% 1:2, Treatment %in% c("-Cobalamin", "Replete")) %>%
+  droplevels()
 
-# find max growth rate/ spar 0.7 allowed for a better representation of the -B12 treatment  
-  fits <- all_splines(Chl ~ Time | Round + Treatment + Bio_Rep, data = IRLcul_t, spar = 0.7)
+# Run all_splines once for all treatments
+fits_all <- all_splines(
+  Chl ~ Time | Round + Treatment + Bio_Rep,
+  data = IRLcul2,
+  spar = 0.7
+)
 
-# create dataframe to hold experiment name, treatment, y0, and mumax  
-  df <- data.frame(
-    ID = names(fits@fits),
-    y0 = sapply(fits@fits, function(fit) fit@par["y0"]),
-    mumax = sapply(fits@fits, function(fit) fit@par["mumax"])
+# Plot all in one frame
+par(mfrow = c(4, 6))
+par(mar = c(2.5, 4, 2, 1))
+plot(fits_all)
+
+# Extract parameters
+IRLcul_mumax_all <- data.frame(
+  ID    = names(fits_all@fits),
+  y0    = sapply(fits_all@fits, function(f) f@par["y0"]),
+  mumax = sapply(fits_all@fits, function(f) f@par["mumax"])
+)
+
+# Split ID into metadata
+IRLcul_mumax_all <- IRLcul_mumax_all %>%
+  tidyr::separate(ID, into = c("Round", "Treatment", "Bio_Rep"), sep = ":") %>%
+  mutate(
+    Round     = as.numeric(Round),
+    Bio_Rep   = as.numeric(Bio_Rep),
+    Treatment = factor(Treatment, levels = c("-Cobalamin", "Replete", "-Thiamine", "-Biotin"))
   )
-  
-  df <- df %>%
-    separate(ID, into = c("Transfer_tmp", "Treatment_ID", "Bio_Rep"), sep = ":", remove = FALSE) %>%
-    mutate(
-      Bio_Rep = as.numeric(Bio_Rep),
-      Transfer = as.numeric(str_remove(Transfer_tmp, "\\.y0$")),
-      Treatment = treatment_name  # make sure Treatment column is consistent
-    ) %>%
-    select(-Transfer_tmp, -Treatment_ID)
-  
-  return(df)
-}
 
-# Define the order of treatments
-levels_order <- c("-Cobalamin", "Replete", "-Thiamine", "-Biotin")
-
-# Process all treatments
-IRLcul_mumax_b12   <- process_treatment(IRLcul, "-Cobalamin", levels_order)
-IRLcul_mumax_rep   <- process_treatment(IRLcul, "Replete", levels_order)
-
-
-# Combine all
-IRLcul_mumax_all <- bind_rows(IRLcul_mumax_b12, IRLcul_mumax_rep)
-
-
+# Summarise
 IRLcul_summary <- IRLcul_mumax_all %>%
-  group_by(Treatment, Transfer) %>%
+  group_by(Treatment, Round) %>%
   summarise(
     mean_mumax = mean(mumax, na.rm = TRUE),
     se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
@@ -176,23 +161,21 @@ IRLcul_summary <- IRLcul_mumax_all %>%
   )
 
 
-# plot data
+```
+
+# Plot IRL culture growth rates
+```{r}
 ggplot(IRLcul_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
 # add error bars one standard devation from mean 
   geom_errorbar(aes(ymin = mean_mumax - se_mumax, ymax = mean_mumax + se_mumax),
                 width = 0.2, linewidth = 0.8) +
   geom_point(size = 3, shape = 95, stroke = 1.5) +
- facet_grid(~Transfer, scales = "free_x", space = "free") +
+ facet_grid(~Round, scales = "free_x", space = "free") +
   scale_color_manual(values = c("-Cobalamin"="#102E50",
-                                "Replete"="#F5C45E",
-                                "-Thiamine"="deeppink4",
-                                "-Biotin"="#667028")) +
+                                "Replete"="#F5C45E")) +
   scale_x_discrete(labels = c(
     "-Cobalamin" = expression("L1/4\u2014B"[12]),
-    "Replete"    = "replete L1/4",
-    "-Thiamine"  = "L1/4\u2014thiamine",
-    "-Biotin"    = "L1/4\u2014biotin"
-  )) +
+    "Replete"    = "replete L1/4")) +
   labs(
     x = "Media",
     y = expression(paste("Maximum growth rate (", mu[max], ")"))
@@ -213,84 +196,71 @@ ggplot(IRLcul_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   
   )
 ```
-
+#Import data and calculuate mu for OTB surface sea water microbiome
 ```{r import OTB surface seawater CHL data}
-OTBwat <- as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/1J7mcUc22TS7YU5_0qULqlZcLO_7sAfZMXJF4i6yO0k0/edit?gid=0"))
-# Remove periods and convert to numeric
-OTBwat$Time <- as.numeric(sub('.', '',OTBwat$Time))  # Remove all periods
-# Convert Date column to Date type
-OTBwat$Date <- ymd(OTBwat$Date)
+# Import data
+OTBwat <- as.data.frame(read_csv("OTB_1006.csv"))
+OTBwat$Time <- as.numeric(gsub("[^0-9.]", "", OTBwat$Time))
+OTBwat$Time <- OTBwat$Time * 48 /24
+OTBwat$Date <- mdy(OTBwat$Date)
 
-# Function to process each treatment
-process_treatment <- function(OTBwat, treatment_name, levels_order) {
- OTBwat_t <- OTBwat %>%
-    filter(Treatment == treatment_name, Round %in% 1:2) %>%
-    mutate(Treatment = factor(Treatment, levels = levels_order)) %>%
-    rename(Chl = `Chlorophyll-A (RFU)`) %>%
-    droplevels()
+# Filter and clean
+OTBwat2 <- OTBwat %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  filter(Round %in% 1:2, Treatment %in% c("-Cobalamin", "Replete")) %>%
+  droplevels()
 
-# group by serial transfer and media treatment   
-  OTBwat_t %<>% group_by(Round, Treatment) %>% filter(n() > 4) %>% ungroup() %>% droplevels()
+# Run all_splines once for both treatments
+fits_all <- all_splines(
+  Chl ~ Time | Round + Treatment + Bio_Rep,
+  data = OTBwat2,
+  spar = 0.7
+)
 
-# find max growth rate/ spar 0.7 allowed for a better representation of the -B12 treatment    
-  fits <- all_splines(Chl ~ Time | Round + Treatment + Bio_Rep, data = OTBwat_t, spar = 0.7)
+# Plot all treatments in one frame
+par(mfrow = c(4, 6))
+par(mar = c(2.5, 4, 2, 1))
+plot(fits_all)
 
-# create dataframe to hold experiment name, treatment, y0, and mumax 
-  df <- data.frame(
-    ID = names(fits@fits),
-    y0 = sapply(fits@fits, function(fit) fit@par["y0"]),
-    mumax = sapply(fits@fits, function(fit) fit@par["mumax"])
+# Extract mu + y0
+OTBwat_mumax_all <- data.frame(
+  ID    = names(fits_all@fits),
+  y0    = sapply(fits_all@fits, function(fit) fit@par["y0"]),
+  mumax = sapply(fits_all@fits, function(fit) fit@par["mumax"])
+)
+
+# Split ID into metadata
+OTBwat_mumax_all <- OTBwat_mumax_all %>%
+  tidyr::separate(ID, into = c("Round", "Treatment", "Bio_Rep"), sep = ":") %>%
+  mutate(
+    Round     = as.numeric(Round),
+    Bio_Rep   = as.numeric(Bio_Rep),
+    Treatment = factor(Treatment, levels = c("-Cobalamin", "Replete"))
   )
-  
-  df <- df %>%
-    separate(ID, into = c("Transfer_tmp", "Treatment_ID", "Bio_Rep"), sep = ":", remove = FALSE) %>%
-    mutate(
-      Bio_Rep = as.numeric(Bio_Rep),
-      Transfer = as.numeric(str_remove(Transfer_tmp, "\\.y0$")),
-      Treatment = treatment_name  # make sure Treatment column is consistent
-    ) %>%
-    select(-Transfer_tmp, -Treatment_ID)
-  
-  return(df)
-}
 
-# Define the order of treatments
-levels_order <- c("-Cobalamin", "Replete")
-
-# Process all treatments
-OTBwat_mumax_b12   <- process_treatment(OTBwat, "-Cobalamin", levels_order)
-OTBwat_mumax_rep   <- process_treatment(OTBwat, "Replete", levels_order)
-
-
-# Combine all
-OTBwat_mumax_all <- bind_rows(OTBwat_mumax_b12, OTBwat_mumax_rep)
-
-
+# Summarise results
 OTBwat_summary <- OTBwat_mumax_all %>%
-  group_by(Treatment, Transfer) %>%
+  group_by(Treatment, Round) %>%
   summarise(
     mean_mumax = mean(mumax, na.rm = TRUE),
     se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
     .groups = "drop"
   )
 
-# plot data
+```
 
+# PLot OTB surface seawater microbiome growth rates
+```{r}
 ggplot(OTBwat_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   geom_errorbar(aes(ymin = mean_mumax - se_mumax, ymax = mean_mumax + se_mumax),
                 width = 0.2, linewidth = 0.8) +
   geom_point(size = 3, shape = 95, stroke = 1.5) +
- facet_grid(~Transfer, scales = "free_x", space = "free") +
+ facet_grid(~Round, scales = "free_x", space = "free") +
   scale_color_manual(values = c("-Cobalamin"="#102E50",
-                                "Replete"="#F5C45E",
-                                "-Thiamine"="deeppink4",
-                                "-Biotin"="#667028")) +
+                                "Replete"="#F5C45E")) +
   scale_x_discrete(labels = c(
     "-Cobalamin" = expression("L1/4\u2014B"[12]),
-    "Replete"    = "replete L1/4",
-    "-Thiamine"  = "L1/4\u2014thiamine",
-    "-Biotin"    = "L1/4\u2014biotin"
-  )) +
+    "Replete"    = "replete L1/4")) +
   labs(
     x = "Media",
     y = expression(paste("Maximum growth rate (", mu[max], ")"))
@@ -312,66 +282,60 @@ ggplot(OTBwat_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   )
 ```
 
-```{r import IRL surface seawater CHL daa}
-IRLwat <- as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/14vcZcv6T1SMArRUWgZT1R-BxI_K3nnAWk3APMDTx_ws/edit?gid=0#gid=0"))
+#Import data and calculuate mu for IRL surface seawater microbiome
+```{r import IRL surface seawater CHL da}
+IRLwat <- as.data.frame(read_csv("IRL_1006.csv"))
 # Remove periods and convert to numeric
 IRLwat$Time <- as.numeric(sub('.', '', IRLwat$Time))
+IRLwat$Time <- IRLwat$Time * 48 /24
 # Convert Date column to Date type
 IRLwat$Date <- ymd(IRLwat$Date)
 
-# Function to process each treatment
-process_treatment <- function(IRLwat, treatment_name, levels_order) {
- IRLwat_t <- IRLwat %>%
-    filter(Treatment == treatment_name, Round %in% 1:2) %>%
-    mutate(Treatment = factor(Treatment, levels = levels_order)) %>%
-    rename(Chl = `Chlorophyll-A (RFU)`) %>%
-    droplevels()
+IRLwat2 <- IRLwat %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  filter(Round %in% 1:2, Treatment %in% c("-Cobalamin", "Replete")) %>%
+  droplevels()
 
-# group by serial transfer and media treatment  
-  IRLwat_t %<>% group_by(Round, Treatment) %>% filter(n() > 4) %>% ungroup() %>% droplevels()
-  
-# find max growth rate/ spar 0.7 allowed for a better representation of the -B12 treatment 
-  fits <- all_splines(Chl ~ Time | Round + Treatment + Bio_Rep, data = IRLwat_t, spar = 0.7)
+# Run all_splines for both treatments
+fits_all <- all_splines(
+  Chl ~ Time | Round + Treatment + Bio_Rep,
+  data = IRLwat2,
+  spar = 0.7
+)
 
-# create dataframe to hold experiment name, treatment, y0, and mumax   
-  df <- data.frame(
-    ID = names(fits@fits),
-    y0 = sapply(fits@fits, function(fit) fit@par["y0"]),
-    mumax = sapply(fits@fits, function(fit) fit@par["mumax"])
+# Plot all growth curves in one frame
+par(mfrow = c(4, 6))
+par(mar = c(2.5, 4, 2, 1))
+plot(fits_all)
+
+# Extract mu and y0
+IRLwat_mumax_all <- data.frame(
+  ID    = names(fits_all@fits),
+  y0    = sapply(fits_all@fits, function(fit) fit@par["y0"]),
+  mumax = sapply(fits_all@fits, function(fit) fit@par["mumax"])
+)
+
+# Split ID into metadata
+IRLwat_mumax_all <- IRLwat_mumax_all %>%
+  tidyr::separate(ID, into = c("Round", "Treatment", "Bio_Rep"), sep = ":") %>%
+  mutate(
+    Round     = as.numeric(Round),
+    Bio_Rep   = as.numeric(Bio_Rep),
+    Treatment = factor(Treatment, levels = c("-Cobalamin", "Replete"))
   )
-  
-  df <- df %>%
-    separate(ID, into = c("Transfer_tmp", "Treatment_ID", "Bio_Rep"), sep = ":", remove = FALSE) %>%
-    mutate(
-      Bio_Rep = as.numeric(Bio_Rep),
-      Transfer = as.numeric(str_remove(Transfer_tmp, "\\.y0$")),
-      Treatment = treatment_name  # make sure Treatment column is consistent
-    ) %>%
-    select(-Transfer_tmp, -Treatment_ID)
-  
-  return(df)
-}
 
-# Define the order of treatments
-levels_order <- c("-Cobalamin", "Replete", "-Thiamine", "-Biotin")
-
-# Process all treatments
-IRLwat_mumax_b12   <- process_treatment(IRLwat, "-Cobalamin", levels_order)
-IRLwat_mumax_rep   <- process_treatment(IRLwat, "Replete", levels_order)
-
-
-# Combine all
-IRLwat_mumax_all <- bind_rows(IRLwat_mumax_b12, IRLwat_mumax_rep)
-
-
+# Summarise
 IRLwat_summary <- IRLwat_mumax_all %>%
-  group_by(Treatment, Transfer) %>%
+  group_by(Treatment, Round) %>%
   summarise(
     mean_mumax = mean(mumax, na.rm = TRUE),
     se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
     .groups = "drop"
   )
+```
 
+# Plot IRL surface seawater growth rates
+```{r}
 
 # plot data
 ggplot(IRLwat_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
@@ -380,17 +344,12 @@ ggplot(IRLwat_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   geom_errorbar(aes(ymin = mean_mumax - se_mumax, ymax = mean_mumax + se_mumax),
                 width = 0.2, linewidth = 0.8) +
   geom_point(size = 3, shape = 95, stroke = 1.5) +
- facet_grid(~Transfer, scales = "free_x", space = "free") +
+ facet_grid(~Round, scales = "free_x", space = "free") +
   scale_color_manual(values = c("-Cobalamin"="#102E50",
-                                "Replete"="#F5C45E",
-                                "-Thiamine"="deeppink4",
-                                "-Biotin"="#667028")) +
+                                "Replete"="#F5C45E")) +
   scale_x_discrete(labels = c(
     "-Cobalamin" = expression("L1/4\u2014B"[12]),
-    "Replete"    = "replete L1/4",
-    "-Thiamine"  = "L1/4\u2014thiamine",
-    "-Biotin"    = "L1/4\u2014biotin"
-  )) +
+    "Replete"    = "replete L1/4")) +
   labs(
     x = "Media",
     y = expression(paste("Maximum growth rate (", mu[max], ")"))
@@ -412,7 +371,13 @@ ggplot(IRLwat_summary, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   )
 ```
 
+# Bind all mu data into a new dataframe
 ```{r}
+fluor_mumax_all$Bio_Rep <- as.character(fluor_mumax_all$Bio_Rep)
+IRLcul_mumax_all$Bio_Rep <- as.character(IRLcul_mumax_all$Bio_Rep)
+OTBwat_mumax_all$Bio_Rep <- as.character(OTBwat_mumax_all$Bio_Rep)
+IRLwat_mumax_all$Bio_Rep <- as.character(IRLwat_mumax_all$Bio_Rep)
+
 # Add an Experiment column to each dataframe
 fluor_mumax_all$Experiment <- "Fluor"
 IRLcul_mumax_all$Experiment <- "IRLcul"
@@ -428,131 +393,128 @@ all_mumax <- bind_rows(fluor_mumax_all,
 # Make sure factors are correctly set
 all_mumax$Experiment <- factor(all_mumax$Experiment)
 all_mumax$Treatment  <- factor(all_mumax$Treatment)
-all_mumax$Transfer   <- factor(all_mumax$Transfer)
+all_mumax$Round   <- factor(all_mumax$Round)
 
 # Quick check
 head(all_mumax)
+
+
 ```
+#save in google
 ```{r}
-# Two-way ANOVA: mumax ~ Experiment * Treatment
+# Save your dataframe to a new sheet
+sheet <- gs4_create(name = "mumax_all", sheets = list(data = all_mumax))
+
+```
+# Two way ANOVA for Experiment and media treatments
+```{r}
+# Two-way ANOVA: mu ~ Experiment * Treatment
 fit <- aov(mumax ~ Experiment * Treatment, data = all_mumax)
 summary(fit)
 ```
+# Post-hoc multiple comparison 
 ```{r}
 Tuk <- TukeyHSD(fit)
-
 Tuk
 ```
+# Two way ANOVA post hoc per serial transfer
 ```{r compute ANOVA and post hoc per serial transfer }
-
 # Filter by Transfer
 all_mumax_T1 <- all_mumax %>%
-  filter(Transfer == 1)
+  filter(Round == 1)
 
 # Run the two-way ANOVA on the filtered data
 fit_T1 <- aov(mumax ~ Experiment * Treatment, data = all_mumax_T1)
-#                     Df  Sum Sq Mean Sq F value   Pr(>F)    
-# Experiment            3 0.09284 0.03095  19.285 1.46e-05 ***
-# Treatment             1 0.27223 0.27223 169.638 6.22e-10 ***
-# Experiment:Treatment  3 0.01052 0.00351   2.185     0.13    
-# Residuals            16 0.02568 0.00160         
-
-# 
-# TukeyHSD(fit_T1)
-# 
-# $Experiment
-#                      diff          lwr         upr     p adj
-# IRLcul-Fluor  -0.08442688 -0.150597698 -0.01825606 0.0104325
-# IRLwat-Fluor   0.08841116  0.022240343  0.15458198 0.0073514
-# OTBwat-Fluor  -0.02537431 -0.091545134  0.04079650 0.6962821
-# IRLwat-IRLcul  0.17283804  0.106667222  0.23900886 0.0000073
-# OTBwat-IRLcul  0.05905256 -0.007118255  0.12522338 0.0890118
-# OTBwat-IRLwat -0.11378548 -0.179956296 -0.04761466 0.0007995
-# 
-# $Treatment
-#                        diff       lwr       upr p adj
-# Replete--Cobalamin 0.213006 0.1783365 0.2476755     0
-
-
 summary(fit_T1)
+TukeyHSD(fit_T1)
+
 #Filter by Transfer
 all_mumax_T2 <- all_mumax %>%
-  filter(Transfer == 2)
+  filter(Round== 2)
 
 # Run the two-way ANOVA on the filtered data
 fit_T2 <- aov(mumax ~ Experiment * Treatment, data = all_mumax_T2)
 fit_T2
 summary(fit_T2)
-#                      Df Sum Sq Mean Sq F value   Pr(>F)    
-# Experiment            3 0.1822  0.0607   49.40 2.59e-08 ***
-# Treatment             1 0.3188  0.3188  259.37 2.62e-11 ***
-# Experiment:Treatment  3 0.0442  0.0147   11.98 0.000231 ***
-# Residuals            16 0.0197  0.0012                     
-# ---
-# 
 TukeyHSD(fit_T2)
 ```
+# plot mean mu and standard devation per media treatment and microbiome 
 ```{r}
+library(ggsignif)
+# Ensure Treatment is a factor in desired order
+all_mumax$Treatment <- factor(all_mumax$Treatment,
+                              levels = c("-Cobalamin", "Replete", "-Thiamine", "-Biotin"))
+
+# Ensure Experiment is a factor in desired order
+all_mumax$Experiment <- factor(all_mumax$Experiment,
+                               levels = c("Fluor", "IRLcul", "OTBwat", "IRLwat"))
+
+# Summary stats for error bars
 all_summary <- all_mumax %>%
-  group_by(Experiment, Treatment, Transfer) %>%
+  group_by(Experiment, Treatment, Round) %>%
   summarise(
     mean_mumax = mean(mumax, na.rm = TRUE),
     se_mumax = sd(mumax, na.rm = TRUE)/sqrt(n()),
     .groups = "drop"
-  ) %>% mutate(
-    Experiment = factor(
-      Experiment,
-      levels = c("Fluor", "IRLcul", "OTBwat", "IRLwat")
-    )
-  ) 
-
-all_mumax <- all_mumax %>%
-  mutate(
-    Experiment = factor(
-      Experiment,
-      levels = c("Fluor", "IRLcul", "OTBwat", "IRLwat")  # match the same order
-    )
   )
 
-# plot mumax
-ggplot(all_mumax, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
-  
-  geom_errorbar(data = all_summary, 
-                aes(x = Treatment, y = mean_mumax, 
-                    ymin = mean_mumax - se_mumax, 
-                    ymax = mean_mumax + se_mumax, 
-                    color = Treatment),
-                width = 0.2, linewidth = 0.8) +
-  geom_point(data = all_mumax, 
-             aes(x = Treatment, y = mumax, color = Treatment),
-             size = 3,
-             alpha = 0.6) +
-  scale_color_manual(values = c("-Cobalamin"="#102E50",
-                                "Replete"="#F5C45E",
-                                "-Thiamine"="deeppink4",
-                                "-Biotin"="#667028")) +
+# Define significance comparisons
+signif_comparisons <- list(c("-Cobalamin", "Replete"))
+
+ggplot(
+  subset(all_mumax, Treatment != "-Cobalamin"), 
+  aes(x = Treatment, y = mumax, color = Treatment)
+)  +
+  # # Error bars from summary
+  # geom_errorbar(
+  #   data = all_summary,
+  #   aes(x = Treatment, ymin = mean_mumax - se_mumax, ymax = mean_mumax + se_mumax),
+  #   color = "black", width = 0.2, linewidth = 0.8, inherit.aes = FALSE
+  # ) +
+  # Raw points
+  geom_point(
+    data = all_mumax,
+    aes(x = Treatment, y = mumax, color = Treatment),
+    size = 3, alpha = 0.6
+  ) +
+  # Significance bars
+  geom_signif(
+    comparisons = signif_comparisons,
+    data = all_mumax,
+    aes(x = Treatment, y = mumax),
+    y_position = 1.1 * max(all_mumax$mumax, na.rm = TRUE),
+    tip_length = 0.03,
+    annotations = "",
+    inherit.aes = FALSE
+  ) +
+  scale_color_manual(values = c(
+    "-Cobalamin" = "#102E50",
+    "Replete"    = "#F5C45E",
+    "-Thiamine"  = "deeppink4",
+    "-Biotin"    = "#667028"
+  )) +
   scale_x_discrete(labels = c(
-    "-Cobalamin" = expression("L1/4\u2014B"[12]),
-    "Replete"    = "replete L1/4",
+    "-Cobalamin" = expression("-B"[12]),
+    "Replete"    = "Replete",
     "-Thiamine"  = "L1/4\u2014thiamine",
     "-Biotin"    = "L1/4\u2014biotin"
   )) +
-  facet_grid(Transfer~Experiment) +
+  facet_grid(Round ~ Experiment) +
   theme_bw() +
   theme(
     strip.background = element_blank(),
     strip.text = element_text(face = "plain"),
-    axis.text.x = element_text(angle = 30, hjust = 1, color = "black", size = 14),
-    axis.text.y = element_text(color = "black", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size =20),
+    axis.text.y = element_text(color = "black", size = 20),
     axis.text.y.right = element_text(color = "black", size = 12),
     legend.title = element_blank(),
     legend.text = element_blank(),
     legend.key = element_blank(),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
-    axis.title.y = element_text(size = 25),
-    axis.title.x = element_text(size= 25),
-    panel.spacing = unit(.1, "cm")
+    axis.title.y = element_text(size = 20),
+    axis.title.x = element_text(size = 20),
+    panel.spacing = unit(0.5, "cm")
   ) +
   labs(
     x = "Media Treatment",
@@ -560,6 +522,518 @@ ggplot(all_mumax, aes(x = Treatment, y = mean_mumax, color = Treatment)) +
   )
 ```
 ```{r}
-ggsave("mumax_all_experiments.png", width = 7, height = 5, dpi = 600)
+# Define significance comparisons
+signif_comparisons <- list(c("-Cobalamin", "Replete"))
+
+# Precompute ymax so max() doesn’t run inside ggplot
+ymax <- 1.1 * max(subset(all_mumax, Experiment == "IRLwat")$mumax, na.rm = TRUE)
+
+ggplot(
+  subset(all_mumax, Experiment == "IRLwat"), 
+  aes(x = Treatment, y = mumax, color = Treatment)
+) +
+  geom_point(
+    data = subset(all_mumax, Experiment == "IRLwat"),
+    aes(x = Treatment, y = mumax, color = Treatment),
+    size = 5, alpha = 0.6
+  ) +
+  geom_signif(
+    comparisons = signif_comparisons,
+    data = subset(all_mumax, Experiment == "IRLwat"),
+    aes(x = Treatment, y = mumax),
+    y_position = ymax,
+    tip_length = 0.03,
+    annotations = "",
+    inherit.aes = FALSE
+  ) +
+  scale_color_manual(values = c(
+    "-Cobalamin" = "#102E50",
+    "Replete"    = "#F5C45E",
+    "-Thiamine"  = "deeppink4",
+    "-Biotin"    = "#667028"
+  )) +
+  scale_x_discrete(labels = c(
+    "-Cobalamin" = expression("\u2013B"[12]),
+    "Replete"    = "Replete",
+    "-Thiamine"  = "L1/4\u2014thiamine",
+    "-Biotin"    = "L1/4\u2014biotin"
+  )) +
+  facet_grid(~Round) +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "plain"),
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size = 20),
+    axis.text.y = element_text(color = "black", size = 20),
+    axis.text.y.right = element_text(color = "black", size = 12),
+    legend.title = element_blank(),
+    legend.text = element_blank(),
+    legend.key = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.y = element_text(size = 20),
+    axis.title.x = element_text(size = 20),
+    panel.spacing = unit(0.5, "cm")
+  ) +
+  labs(
+    x = "Media Treatment",
+    y = expression(paste("Maximum growth rate (", mu[max], ")"))
+  )
+
+
+```
+
+```{r sig diff between treatments}
+
+experiments <- unique(all_mumax$Experiment)
+rounds <- unique(all_mumax$Round)
+
+results <- data.frame()
+
+for (exp in experiments) {
+  for (r in rounds) {
+    df <- all_mumax %>%
+      filter(Experiment == exp,
+             Round == r,
+             Treatment %in% c("-Cobalamin", "Replete"))
+    
+    # Run t-test or one-way ANOVA
+    test <- t.test(mumax ~ Treatment, data = df)
+    
+    results <- rbind(results, data.frame(
+      Experiment = exp,
+      Round = r,
+      mean_Cobalamin = mean(df$mumax[df$Treatment == "-Cobalamin"]),
+      mean_Replete = mean(df$mumax[df$Treatment == "Replete"]),
+      p_value = test$p.value
+    ))
+  }
+}
+
+results
+```
+# ALL EASY LINEAR METHOD
+# IRL culture mu using all easy linear 
+# remove outliers
+### outliers are considered values the drop below T0 RFU values 
+
+```{r}
+# Compute T0 baseline per replicate, treatment, and round
+baseline <- aggregate(
+  `Chlorophyll-A (RFU)` ~ Bio_Rep + Treatment + Round,
+  data = subset(IRLcul, Time == 0),
+  FUN = mean,
+  na.rm = TRUE
+)
+names(baseline)[names(baseline) == "Chlorophyll-A (RFU)"] <- "Chl_T0"
+
+# Merge baseline back into the full dataset
+IRLcul_merged <- merge(IRLcul, baseline, by = c("Bio_Rep", "Treatment", "Round"), all.x = TRUE)
+
+# ⃣ Keep all T0 points, and remove any post-T0 points where replicate < its T0
+IRLcul_clean <- subset(
+  IRLcul_merged,
+  Time == 0 | `Chlorophyll-A (RFU)` >= Chl_T0
+)
+```
+
+# IRL culture trial 1
+```{r}
+IRLcul_mumax <- IRLcul_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(1),
+         Time >= 0) %>%  # <-- exclude T0
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+IRLcul1 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRLcul_mumax, h = 7, quota = 1)
+
+par(mfrow = c(3,3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(IRLcul1 , log = "y")
+
+summary(IRLcul1 )
+coef(IRLcul1 )
+rsquared(IRLcul1)
+```
+# all easy linear 
+# IRL culture trial 2
+```{r}
+IRLcul_mumax2 <- IRLcul_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(2),
+         Time >= 0) %>% 
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+IRLcul2 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRLcul_mumax2, h =7, quota = 1)
+
+par(mfrow = c(3,3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(IRLcul2 , log = "y")
+
+summary(IRLcul2 )
+coef(IRLcul2 )
+rsquared(IRLcul2)
+
+```
+# all easy linear OTB 
+#remove outliers
+```{r}
+# 1️⃣ Compute T0 baseline per replicate, treatment, and round
+baseline <- aggregate(
+  `Chlorophyll-A (RFU)` ~ Bio_Rep + Treatment + Round,
+  data = subset(OTBwat, Time == 0),
+  FUN = mean,
+  na.rm = TRUE
+)
+names(baseline)[names(baseline) == "Chlorophyll-A (RFU)"] <- "Chl_T0"
+
+# Merge baseline back into the full dataset
+OTBwat_merged <- merge(OTBwat, baseline, by = c("Bio_Rep", "Treatment", "Round"), all.x = TRUE)
+
+# ⃣ Keep all T0 points, and remove any post-T0 points where replicate < its T0
+OTBwat_clean <- subset(
+  OTBwat_merged,
+  Time == 0 | `Chlorophyll-A (RFU)` >= Chl_T0
+)
+```
+
+# OTB water trial 1
+```{r}
+OTB_mumax1 <- OTBwat_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(1),
+         Time >= 0) %>% 
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+
+OTBwat1 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, OTB_mumax1, h = 7, quota = 1)
+
+par(mfrow = c(3,3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(OTBwat1 , log = "y")
+
+summary(OTBwat1)
+coef(OTBwat1)
+rsquared(OTBwat1)
+
+```
+# all easy linear 
+# OTB water trial 2
+```{r}
+OTB_mumax2 <- OTBwat_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(2),
+         Time >= 0) %>% 
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+
+OTBwat2 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, OTB_mumax2, h = 5, quota = 1)
+
+par(mfrow = c(3,3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(OTBwat2  , log = "y")
+
+summary(OTBwat2)
+coef(OTBwat2)
+rsquared(OTBwat2)
+
+```
+# all easy linear 
+# IRLwat all easy linear 
+#remove outliers
+```{r}
+# 1️⃣ Compute T0 baseline per replicate, treatment, and round
+baseline <- aggregate(
+  `Chlorophyll-A (RFU)` ~ Bio_Rep + Treatment + Round,
+  data = subset(IRLwat, Time == 0),
+  FUN = mean,
+  na.rm = TRUE
+)
+names(baseline)[names(baseline) == "Chlorophyll-A (RFU)"] <- "Chl_T0"
+
+# Merge baseline back into the full dataset
+IRLwat_merged <- merge(IRLwat, baseline, by = c("Bio_Rep", "Treatment", "Round"), all.x = TRUE)
+
+# ⃣ Keep all T0 points, and remove any post-T0 points where replicate < its T0
+IRLwat_clean <- subset(
+  IRLwat_merged,
+  Time == 0 | `Chlorophyll-A (RFU)` >= Chl_T0
+)
+```
+# all easy linear 
+# IRL water trial 1 Replete
+```{r}
+IRL_mumax1 <- IRLwat_clean %>%
+  filter(Treatment %in% c("Replete"), Round %in% c(1)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+IRLwat1 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRL_mumax1, h = 5, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(IRLwat1 , log = "y")
+
+summary(IRLwat1)
+coef(IRLwat1)
+rsquared(IRLwat1)
+
+```
+# all easy linear 
+# IRL water trial 2 Replete
+```{r}
+IRL_mumax2 <- IRLwat_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(1),
+         Time >= 0) %>%  # <-- exclude T0
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+IRLwat2 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRL_mumax2, h =6, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(IRLwat2 , log = "y")
+
+summary(IRLwat2)
+coef(IRLwat2)
+rsquared(IRLwat2)
+```
+# all easy linear 
+# IRL water trial 1 -B12
+```{r}
+IRL_mumax1_b <- IRLwat_clean %>%
+  filter(Treatment %in% c("-Cobalamin"),
+         Round %in% c(1),
+         Time >= 0) %>%  # <-- exclude T0
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+IRLwat1_b <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRL_mumax1_b, h = 4, quota =1)
+
+par(mfrow = c(3,3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(IRLwat1_b , log = "y")
+
+summary(IRLwat1_b)
+coef(IRLwat1_b)
+rsquared(IRLwat1_b)
+
+
+```
+# all easy linear 
+# IRL water trial 2 -B12
+```{r}
+IRL_mumax2_b <-  IRLwat_clean %>%
+  filter(Treatment %in% c("-Cobalamin"),
+         Round %in% c(2),
+         Time >= 0) %>%  
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+IRLwat2_b <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRL_mumax2_b, h =5, quota =1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(IRLwat1_b , log = "y")
+
+summary(IRLwat2_b)
+coef(IRLwat2_b)
+rsquared(IRLwat2_b)
+
+```
+#Save results to a google sheet
+```{r}
+# Helper function to handle matrix or vector coefficients
+make_df <- function(model, round_num, experiment_name) {
+  coefs <- coef(model)
+  
+  if (is.matrix(coefs)) {
+    df <- as.data.frame(coefs) %>%
+      tibble::rownames_to_column("Group") %>%
+      mutate(
+        Round = round_num,
+        Experiment = experiment_name,
+        r2 = rsquared(model)
+      )
+  } else {
+    df <- data.frame(
+      Group = names(coefs),
+      Estimate = as.numeric(coefs),
+      Round = round_num,
+      Experiment = experiment_name,
+      r2 = rep(rsquared(model), length(coefs))
+    )
+  }
+  
+  return(df)
+}
+
+# Create data frames for all models with experiment names
+df1 <- make_df(IRLcul1, 1, "IRL Culture")
+df2 <- make_df(IRLcul2, 2, "IRL Culture")
+df3 <- make_df(OTBwat1, 1, "OTB Water")
+df4 <- make_df(OTBwat2, 2, "OTB Water")
+df5 <- make_df(IRLwat1, 1, "IRL Water")
+df6 <- make_df(IRLwat2, 2, "IRL Water")
+df7 <- make_df(IRLwat1_b, 1, "IRL Water B")
+df8 <- make_df(IRLwat2_b, 2, "IRL Water B")
+
+# Combine all results
+all_results <- bind_rows(df1, df2, df3, df4, df5, df6, df7, df8)
+
+# Optional: reorder columns
+all_results <- all_results %>%
+  select(Experiment, Round, Group, y0, mumax, r2)
+
+
+# Save your dataframe to a new sheet
+sheet <- gs4_create(name = "mumax_all", sheets = list(data = all_results))
+
+```
+#Plot IRL water mumax
+```{r}
+# Extract just the columns we need
+mumax_results <- all_results %>%
+  select(Experiment, Round, Group, mumax) %>%
+  mutate(ExperimentRound = paste(Experiment, Round, sep = "_"))
+
+# Filter IRL Water only
+mumax_IRLwater <- mumax_results %>%
+  filter(grepl("IRL Water", Experiment))
+
+
+ggplot(mumax_IRLwater, aes(x = Experiment, y = mumax, color = Experiment)) +
+  # Raw replicate points
+  geom_point(size = 3, shape = 16, position = position_jitter(width = 0.1)) +
+  
+  # Mean per Experiment+Round (open circle)
+  stat_summary(fun = mean, geom = "point", shape = 1, size = 5, stroke = 1.2) +
+  
+  # Error bars (standard error)
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2) +
+  
+  facet_grid(~Round) +
+  scale_color_manual(values = c(
+    "IRL Water B" = "#102E50",
+    "IRL Water" = "#F5C45E",
+    "-Thiamine" = "deeppink4",
+    "-Biotin" = "#667028"
+  )) +
+  scale_x_discrete(labels = c(
+  "IRL Water B"  = expression("\u2013B"[12]) ,    # em dash B₁₂
+  "IRL Water"   = "Replete",
+  "-Thiamine"   = expression("\u2013Thiamine"), # em dash Thiamine
+  "-Biotin"     = expression("\u2013Biotin")    # em dash Biotin
+))+
+  theme_minimal()  +
+  theme(
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    axis.title = element_text(family = "Arial", size = 20),
+    axis.text = element_text(family = "Arial", size = 20, color = "black"),
+    axis.text.x = element_text(family = "Arial", size = 20, color = "black"),
+    strip.text = element_text(family = "Arial", size = 20, color = "black"),
+    legend.title = element_blank(),
+    legend.text = element_blank(),
+    legend.key = element_blank()
+  ) +
+    labs(
+      x = "Media Treatment",
+      y = expression(paste("(", mu, ") RFU" * "\u00B7" * "day"^-1, " "))
+    )
+  
+  
+ggsave("IRL_mumax.png", width = 10, height = 7)
+```  
+
+
+#Bind growth rate results for IRL water for ANOVA
+```{r}
+library(growthrates)
+library(dplyr)
+
+# Example: extract results from one fit
+df5 <- as.data.frame(coef(IRLwat1))
+df5$Round <- 1
+df5$Experiment <- "IRL Water"
+
+df6 <- as.data.frame(coef(IRLwat2))
+df6$Round <- 2
+df6$Experiment <- "IRL Water"
+
+df7 <- as.data.frame(coef(IRLwat1_b))
+df7$Round <- 1
+df7$Experiment <- "IRL Water -B12"
+
+df8 <- as.data.frame(coef(IRLwat2_b))
+df8$Round <- 2
+df8$Experiment <- "IRL Water -B12"
+
+# Combine
+IRLwater <- bind_rows(df5, df6, df7, df8)
+
+```
+
+#T-test for IRL water trial 1
+```{r}
+# Filter only Round 1
+round1 <- IRLwater[IRLwater$Round == 1, ]
+
+# Make sure 'Experiment' is a factor
+round1$Experiment <- as.factor(round1$Experiment)
+
+# Perform the two-sample t-test
+t.test(mumax ~ Experiment, data = round1, var.equal = TRUE)
+#Replete / 0B12 growth rates not significantly different 
+```
+#T-test for IRL water trial 2
+```{r}
+# Filter only Round 1
+round2 <- IRLwater[IRLwater$Round == 2, ]
+
+# Make sure 'Experiment' is a factor
+round1$Experiment <- as.factor(round1$Experiment)
+
+# Perform the two-sample t-test
+t.test(mumax ~ Experiment, data = round2, var.equal = TRUE)
+#Replete / -B12 growh grates not significantly different 
+```
+
+```{r}
+# Set up grid
+par(mfrow = c(3, 1))
+par(mar = c(2, 2, 2, 1))       # margins for individual plots
+par(oma = c(3, 3, 4, 2))       # outer margins for top titles
+
+# Plot each fit
+plot(IRLcul1, log = "y")
+mtext("IRL Culture Trial 1", side = 2, outer = TRUE, line = 1, cex = 1.5 )
+
+plot(IRLcul2, log = "y")
+mtext("IRL Culture Trial 2", side = 2, outer = TRUE, line = 1, cex = 1.5 )
+
+plot(OTBwat1, log = "y")
+mtext("OTB Water Trial 1", side =2, outer = TRUE,  line = 1, cex = 1.5 )
+
+plot(OTBwat2, log = "y")
+mtext("OTB Water Trial 2", side = 2, outer = TRUE, line = 1, cex = 1.5 )
+
+plot(IRLwat1, log = "y")
+mtext("IRL Water Trial 1 Replete", side = 2, outer = TRUE, line = 1, cex = 1.5 )
+
+plot(IRLwat2, log = "y")
+mtext("IRL Water Trial 2 Replete", side = 2, outer = TRUE, line = 1, cex = 1.5)
+
+plot(IRLwat1_b, log = "y")
+mtext("IRL Water Trial 1 -Cobalamin", side = 2, outer = TRUE, line = 1, cex = 1.5 )
+
+plot(IRLwat2_b, log = "y")
+mtext("IRL Water Trial 2 -Cobalamin", side = 2, outer = TRUE, line = 1, cex = 1.5 )
+
 ```
 
