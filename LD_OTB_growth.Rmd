@@ -1,14 +1,25 @@
+---
+title: "Low-diversity growth curves"
+output: html_document
+date: "2025-06-09"
+---
+
+# Install packages 
 ```{r import packages}
-#install.packages("googlesheets4)
 library(googlesheets4) #scrapes google sheets
 library(dplyr) # dataframe manipulation
 library(ggplot2) # plotting package
 library(lubridate)
 library(tidyr)
+library(readr)
 library(scales)
 ```
-
-````{r my palette}
+#Source function for growth curves
+```{r}
+source("~/Desktop/pyro/vitamin_growth_exp/plot_growthfunction.R")
+```
+# Create a color pallete
+```{r my palette}
 pp_palette <- c(
   "#7D8F69",  
   "#C09F80", 
@@ -21,137 +32,50 @@ pp_palette <- c(
 
 scales::show_col(pp_palette)
 ```
-
+# Import data
 ```{r import data}
-fluor<-as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/1iD3GXey2Rg31hJI7V125ByjyR8TPvAD1kbDD4dR87VE/edit?usp=sharing"))
+fluor<-as.data.frame(read_csv("fluor.csv"))
 fluor$Time <- as.numeric(sub('.', '', fluor$Time))
-fluor$Date <- ymd(fluor$Date)
-fluor$Time <- fluor$Time * 48
+fluor$Date <- mdy(fluor$Date)
+fluor$Time <- fluor$Time * 48 /24
+```
+#Use function to pllot growth curves
+```{r}
+growth_LD <- plot_func(fluor, fluor$Time, fluor$`Chlorophyll-A (RFU)`, facet_col = "Round")
+growth_LD
+ggsave("LD_growth_curves.png", width = 10, height = 7)
 ```
 
+# Calculate mean Chlorphyll-a and standard deveation
 ```{r}
-fluor %<>%
-  group_by(Round, Treatment) %>%
-  filter(n() > 0) %>%
-  ungroup() %>%
-  droplevels()
-```
-
-```{r}
-# Convert Time from hours to days
-fluor$Time_in_Days <- fluor$Time / 24  # Convert Time from hours to days
-```
-
-```{r}
-# Make Round a factor
-fluor$Round <- as.factor(fluor$Round)
-
-# Filter desired rounds
-combined_subset <- fluor %>%
-  filter(Round %in% c(1, 2, 3, 4))
-
-# Get min/max time per round
-round_duration <- combined_subset %>%
-  group_by(Round) %>%
-  summarise(min_time = min(Time_in_Days), max_time = max(Time_in_Days)) %>%
-  arrange(as.numeric(as.character(Round))) %>%
-  mutate(offset = cumsum(lag(max_time - min_time + 1, default = 0)))  # add 1-day buffer
-
-# Join offset and compute adjusted time
-combined_subset <- combined_subset %>%
-  left_join(round_duration %>% select(Round, offset), by = "Round") %>%
-  mutate(Time_adj = Time_in_Days + offset)
-
-# Shading rectangles
-round_shading <- combined_subset %>%
-  group_by(Round) %>%
-  summarise(start = min(Time_adj), end = max(Time_adj), .groups = "drop")
-
 # Summarize mean/sd
-combined_avg <- combined_subset %>%
-  group_by(Time_adj, Treatment, Round) %>%
+combined_avg <- fluor %>%
+  group_by(Time,Treatment, Round) %>%
   summarise(
     mean_chl = mean(`Chlorophyll-A (RFU)`, na.rm = TRUE),
     sd_chl = sd(`Chlorophyll-A (RFU)`, na.rm = TRUE),
     .groups = "drop"
   )
-
 ```
-
+# Plot growth curves 
 ```{r}
 LD_OTB_all_growth <- ggplot(
   combined_avg %>% 
     filter(Treatment %in% c("-Cobalamin", "Replete", "-Biotin", "-Thiamine")),
-  aes(x = Time_adj, y = mean_chl)
-)  +
-  
+  aes(x = Time, y = mean_chl)
+) +
   # Error bars
   geom_errorbar(
-    aes(ymin = mean_chl - sd_chl, ymax = mean_chl + sd_chl, group = interaction(Treatment, Round)),
+    aes(ymin = mean_chl - sd_chl, ymax = mean_chl + sd_chl,
+        group = interaction(Treatment, Round)),
     width = 0.3, color = "black", alpha = 0.6
   ) +
   
-  # Lines for each Treatment × Round
+  # Lines and points
   geom_line(aes(group = interaction(Treatment, Round), color = Treatment)) +
-  
-  # Points with white fill and colored outline
   geom_point(shape = 21, fill = "white", aes(color = Treatment), stroke = 1.2, size = 2) +
   
-  # Manual fill scale for round shading
-  scale_fill_manual(
-    name = "Serial transfer",
-    values = c("1" = "white", "2" = "grey", "3" = "white", "4" = "grey")
-  ) +
-  
-  # Manual color scale for treatments
-  scale_color_manual(
-    values = c("-Cobalamin" = "#102E50", "Replete" = "#F5C45E", "-Thiamine" = "deeppink4", "-Biotin" = "#667028"),
-    labels = c(
-      "-Cobalamin" = expression("\u2014B"[12]), 
-      "-Thiamine"  = "\u2014Thiamine",
-      "-Biotin"    = "\u2014Biotin",
-      "Replete"    = "Replete"
-    ),
-    name = "Treatment"
-  ) +
-  
-  labs(
-    x = "Time (days)",
-    y = expression(paste("Chlorophyll-", italic("a"), " fluorescence (RFU)"))
-  ) +
-  
-  theme_minimal() +
-  theme(
-    panel.border = element_rect(fill = NA, color = "black"),
-    panel.grid = element_blank(),
-    axis.title = element_text(size = 20),
-    axis.text = element_text(size = 20, color = "black"),
-    strip.text = element_text(size = 20),
-    legend.title = element_text(size = 20),
-    legend.text = element_text(size = 20),
-    legend.position = "right"
-  )
-
-LD_OTB_all_growth 
-```
-```{r plot for presentation}
-LD_OTB_all_growth <- ggplot(
-  fluor %>%  
-    filter(Treatment %in% c("-Cobalamin", "Replete", "-Biotin", "-Thiamine")),
-  aes(x = Time_in_Days, y = `Chlorophyll-A (RFU)` )
-) + 
-  facet_grid(~Round) +   # <- plus at the end
- # geom_line(aes(color = Treatment)) +
- # geom_point(aes(color = Treatment), shape = 20, size = 2) +
-geom_smooth(aes(group = Treatment, color = Treatment),se = FALSE,size = 2) + 
-  geom_point(aes(color = Treatment)) +
-
- # facet_grid(Round~Treatment, scales = "free") +
-  scale_x_continuous(breaks= pretty_breaks()) +
-  labs(
-    x = "Time (days)", 
-    y = expression(paste("Chlorophyll-", italic("a"), " fluorescence (RFU)"))
-  ) +
+  # Manual color scale for treatments (legend labels)
   scale_color_manual(
     values = c(
       "-Cobalamin" = "#102E50",
@@ -160,71 +84,40 @@ geom_smooth(aes(group = Treatment, color = Treatment),se = FALSE,size = 2) +
       "-Biotin"    = "#667028"
     ),
     labels = c(
-      "-Cobalamin" = expression("L1/4\u2014B"[12]),
-      "-Thiamine"  = "L1/4\u2014thiamine",
-      "-Biotin"    = "L1/4\u2014biotin",
-      "Replete"    = "replete L1/4 "
+      "-Cobalamin" = expression(" —B"[12]),  
+      "-Thiamine"  = expression("—thiamine"),
+      "-Biotin"    = expression("—biotin"),
+      "Replete"    = "replete"
     ),
     name = "Treatment"
   ) +
+  
+  labs(
+    x = "Time (days)",
+    y = expression(paste("Chlorophyll-", italic("a"), " fluorescence (RFU)"))
+  ) +
+  facet_grid(~Round) +
   theme_minimal() +
   theme(
+    panel.border = element_rect(fill = NA, color = "black"),
     panel.grid = element_blank(),
-    panel.border = element_rect(color = "black", fill = NA, size = 1),
-    plot.background = element_blank(),
-    axis.text.y = element_text(size = 20, color = "black"),
-    axis.text.x = element_text(size = 20, color = "black"),
-    legend.text = element_text(size = 25),
-    legend.title = element_text(size = 25),
-    axis.title.y = element_text(size = 25),
-    axis.title.x = element_text(size = 25),
+    axis.title = element_text(family= "Arial", size = 20),
+    axis.text = element_text(family= "Arial", size = 20, color = "black"),
+    strip.text = element_text(family= "Arial", size = 20, color = "black"),
+    legend.title = element_text(family= "Arial", size = 18, color = "black"),
+    legend.text = element_text(family= "Arial", size = 18, color = "black"),
     legend.position = "bottom"
   )
 
+
+
+
 LD_OTB_all_growth 
+
+ggsave("LD_growth_curves.png", width = 10, height = 7)
 ```
 
-```{r}
-ggsave("LD_OTB_growth_all.png", width = 12, height = 8, dpi = 600)
-```
-
-```{r}
-# Make Round a factor
-fluor$Round <- as.factor(fluor$Round)
-
-# Filter desired rounds
-combined_subset <- fluor %>%
-  filter(Round %in% c(1, 2, 3, 4))
-
-# Get min/max time per round
-round_duration <- combined_subset %>%
-  group_by(Round) %>%
-  summarise(min_time = min(Time_in_Days), max_time = max(Time_in_Days)) %>%
-  arrange(as.numeric(as.character(Round))) %>%
-  mutate(offset = cumsum(lag(max_time - min_time + 1, default = 0)))  # add 1-day buffer
-
-# Join offset and compute adjusted time
-combined_subset <- combined_subset %>%
-  left_join(round_duration %>% select(Round, offset), by = "Round") %>%
-  mutate(Time_adj = Time_in_Days + offset)
-
-# Shading rectangles
-round_shading <- data.frame(
-  Round = factor(1:4),
-  xmin = c(0.5, 1.5, 2.5, 3.5),
-  xmax = c(1.5, 2.5, 3.5, 4.5)
-)
-# Summarize mean/sd
-combined_avg <- combined_subset %>%
-  group_by(Time_adj, Treatment, Round) %>%
-  summarise(
-    mean_chl = mean(`Chlorophyll-A (RFU)`, na.rm = TRUE),
-    sd_chl = sd(`Chlorophyll-A (RFU)`, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-```
-
+# Calculate maximum biomass
 ```{r max biomass}
 # calculate maximum chlorphyll-a fluoresence values for each round and medium treatment
 max_bio <- fluor %>%
@@ -235,9 +128,10 @@ max_bio <- fluor %>%
 
 print(max_bio)
 ```
-
+# Prepare data for plotting
 ```{r}
-# calculate mean and standard devation of maximim chlorphyll-a fluoresence values
+
+# Calculate mean and SD
 summary_stats <- max_bio %>%
   group_by(Treatment, Round) %>%
   summarise(
@@ -246,185 +140,196 @@ summary_stats <- max_bio %>%
     .groups = "drop"
   )
 
-# plot maximum biomass
-LD_OTB_all <- ggplot(max_bio, aes(x = 1, y = Max_Chl, color = Treatment)) + 
-  # Biological replicates
-  geom_point(position = position_jitter(width = 0.1), size = 3, alpha = 0.6) +
+# Make Treatment a factor in both datasets
+max_bio$Treatment <- factor(max_bio$Treatment, 
+                            levels = c( "-Biotin", "-Cobalamin","-Thiamine", "Replete"))
+
+summary_stats$Treatment <- factor(summary_stats$Treatment, 
+                                  levels = c("-Cobalamin", "-Thiamine", "-Biotin", "Replete"))
+```
+
+# Plot maximum biomass
+```{r}
+
+# Define comparisons
+signif_comparisons <- list(
+  c("Replete", "-Biotin"),
+  c("Replete", "-Thiamine"),
+  c("-Cobalamin", "Replete")
+)
+
+max_bio_LD <- ggplot(max_bio, aes(x = Treatment, y = Max_Chl, color = Treatment)) +
+  
+  # Raw points with jitter
+  geom_point( size = 3, shape = 16, position = position_jitter(width = 0.1)) +
   
   # Error bars for mean ± SD
-  geom_errorbar(
+   geom_errorbar(
     data = summary_stats,
-    aes(x = 1, ymin = mean_chl - sd_chl, ymax = mean_chl + sd_chl, color = Treatment),
-    position = position_dodge(width = 0.6),
-    width = 0.2,
-    linewidth = 1,
-    inherit.aes = FALSE
-  ) +
+     aes(x = Treatment, y = mean_chl, ymin = mean_chl - sd_chl, ymax = mean_chl + sd_chl, color = Treatment),
+     position = position_dodge(width = 0.6),
+     width = 0.2,
+     linewidth = 0.7,
+     inherit.aes = FALSE
+   ) +
+
+  # # Open circle for mean
+   geom_point(
+     data = summary_stats,
+     aes(x = Treatment, y = mean_chl, color = Treatment),
+     shape = 21,
+     fill = "white",
+     size = 3,
+     stroke = 1,
+     position = position_dodge(width = 0.6),
+     inherit.aes = FALSE
+   ) +
+#Option to add significant comparison bars
+#   geom_signif(
+#   comparisons = signif_comparisons,
+#   y_position = c(
+#     1.1*max(max_bio$Max_Chl),
+#     1.15*max(max_bio$Max_Chl),
+#     1.2*max(max_bio$Max_Chl)
+#   ), color = "black",
+#   tip_length = 0.03,
+#   annotations = c("", "", "")
+# ) +
+  # Facet by Round
+  facet_grid(~Round) +
   
-  # Mean points
-  geom_point(
-    data = summary_stats,
-    aes(x = 1, y = mean_chl, color = Treatment),
-    shape = 21, fill = "white",
-    size = 3, stroke = 1,
-    position = position_dodge(width = 0.6),
-    inherit.aes = FALSE
-  ) +
-  
-  facet_grid(~Round, switch = "x") +   # one facet per Round
+  # Axis labels
   labs(
     x = "Serial transfer",
-    y = expression(paste("Maximum Chlorophyll-", italic("a"), " fluorescence achieved (RFU)"))
-  ) + scale_color_manual(
-    values = c(
-      "-Cobalamin" = "#102E50", 
-      "Replete"    = "#F5C45E",
-      "-Thiamine"  = "deeppink4",
-      "-Biotin"    = "#667028"
-    ),
-   labels = c(
-    "-Cobalamin" = expression("L1/4\u2014B"[12]),
-    "-Thiamine"  = "L1/4\u2014thiamine",
-    "-Biotin"    = "L1/4\u2014biotin",
-    "Replete"    = "replete L1/4 "
-    ),
-    guide = "legend"   # 👈 disables the legend for color
-  ) +
-  
+    y = expression(paste("Maximum Chlorophyll-", italic("a"), " fluorescence achieved (RFU)"))) +
+ scale_color_manual(
+  values = c(
+    "-Cobalamin" = "#102E50",
+    "-Thiamine"  = "deeppink4",
+    "-Biotin"    = "#667028",
+    "Replete"    = "#F5C45E"
+  ),
+  labels = c(
+    "-Cobalamin" = expression("—B"[12]),
+    "-Thiamine"  = expression("—Thiamine"),
+    "-Biotin"    = expression("—Biotin"),
+    "Replete"    = "Replete" ),
+  name = "Treatment",
+  guide = guide_legend(
+    override.aes = list(
+      shape = 21,        # match the points
+      fill = "white",    # match fill
+      stroke = 1.2,      # match line width of points
+      size = 2,          # match point size
+      linetype = 1       # match line type
+    ))) +
+  scale_x_discrete(
+  labels = c(
+    "-Biotin"    = expression("\u2013Biotin"),         # en-dash
+    "-Cobalamin" = expression("\u2013B"[12]),          # en-dash + subscript 12
+    "-Thiamine"  = expression("\u2013Thiamine"),      
+    "Replete"    = "Replete"
+  )) +
+  scale_y_continuous(labels = comma)+
+  # Theme
   theme_minimal() +
-  theme(
-    panel.border = element_rect(fill = NA, color = "black", linewidth = 1),
-    panel.grid.major = element_line(color = "white"),
-    plot.background  = element_blank(),
-    panel.grid       = element_blank(), 
-   panel.background = element_blank(),
-    axis.title.x = element_text(size = 30, color = "black"),
-    axis.title.y = element_text(size = 30, color = "black"),
-    axis.text.y = element_text(size = 25, color = "black"),   
-     axis.text.x = element_blank(),# remove x-axis numbers
-    axis.ticks.x = element_blank()  ,       # remove x-axis ticks
-    strip.text = element_text(size = 20),
-     axis.text = element_text(size= 30),
-
-  legend.key.size = unit(1.2, "cm"),   # makes each legend box larger
-  legend.text = element_text(size = 22),
-  legend.title = element_text(size = 24),
-  legend.spacing.x = unit(0.5, "cm"),  # adds space between keys
-  legend.spacing.y = unit(0.4, "cm") ,  # vertical spacing (if stacked)
-
-   legend.position = "right"   )            
-
-#saveRDS(LD_OTB_all, "LD_OTB_all.RDS")
-
-
-LD_OTB_all
+    theme(
+      panel.border = element_rect(fill = NA, color = "black"),
+      panel.grid = element_blank(),
+      axis.text.y = element_text(size = 16, color = "black"),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 16, color = "black"),
+      axis.title.y = element_text(family= "Arial", size = 20),
+      axis.title.x = element_text(size = 20, margin = margin(t = 10)),
+      strip.text.x = element_text(size = 20),
+      strip.text = element_text(family= "Arial", size = 20, color = "black"),
+      legend.title = element_text(family= "Arial", size = 16, color = "black"),
+      legend.text = element_text(family= "Arial", size = 16, color = "black"),
+      legend.position = "none",
+        legend.key.size = unit(1.5, "cm")
+    )
+  
+ max_bio_LD 
+ggsave("LD_max_bio.png", width = 7, height = 10)
 ```
-
-```{r}
-ggsave("max_bio_LD_OTB.png", width = 12, height = 10)
-```
-
+# Combine plots
 ```{r}
 library(patchwork)
 
-combo <- (LD_OTB_all_growth + LD_OTB_all) + 
+combo <- (max_bio_LD + growth_LD) + 
          plot_layout(guides = "collect") & 
-         theme(legend.position = "right",
+         theme(legend.position = "bottom",
                 legend.justification = "center")
 
 combo  
 ```
-
-
+# Serial transfer 1 Calculate maximum biomass 
 ```{r}
-ggsave("LD_OTB_paper.png", width = 26, height = 10, dpi = 600)
-
+max_bio_1 <- fluor %>% filter(Round %in% c(1)) %>% # change serial transfer for calculations
+  filter(Treatment %in% c("-Cobalamin", "Replete", "-Thiamine","-Biotin")) %>%
+  group_by(Treatment, Round, Rep) %>% 
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE)) %>%
+  ungroup()
 ```
-
-```{r ANOVA and post-hoc multiple comparisons max biomass}
-max_bio <- fluor %>% filter(Round %in% c(1)) %>% # change serial transfer for calculations
+# Serial transfer 1 ANOVA and post-hoc multiple comparisons
+```{r}
+aov_max_1<-  aov(Max_Chl ~ Treatment, data = max_bio_1)
+TukeyHSD(aov_max_1)
+summary(aov_max_1)
+```
+# Serial transfer 2 Calculate maximum biomass 
+```{r}
+max_bio_2 <- fluor %>% filter(Round %in% c(2)) %>% # change serial transfer for calculations
   filter(Treatment %in% c("-Cobalamin", "Replete", "-Thiamine","-Biotin")) %>%
   group_by(Treatment, Round, Rep) %>% 
   summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE)) %>%
   ungroup()
 
-aov_max<-  aov(Max_Chl ~ Treatment, data = max_bio)
-TukeyHSD(aov_max)
- 
- #round 1
-#      Df   Sum Sq  Mean Sq F value  Pr(>F)   
-# Treatment    3 42252371 14084124   15.03 0.00119 **
-# Residuals    8  7496135   937017                   
-# ---
-# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
- 
+max_bio_2 %>%
+  group_by(Treatment) %>%
+  summarise(mean = mean(Max_Chl),
+            sd   = sd(Max_Chl),
+            n    = n())
+```
+# Serial transfer 2 ANOVA and post-hoc multiple comparisons
+```{r}
+aov_max_2<-  aov(Max_Chl ~ Treatment, data = max_bio_2)
+TukeyHSD(aov_max_2)
+summary(aov_max_2)
+```
+# Serial transfer 3 Calculate maximum biomass 
+```{r}
+max_bio_3 <- fluor %>% filter(Round %in% c(3)) %>% # change serial transfer for calculations
+  filter(Treatment %in% c("-Cobalamin", "Replete", "-Thiamine","-Biotin")) %>%
+  group_by(Treatment, Round, Rep) %>% 
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE)) %>%
+  ungroup()
 
-# 
-# $Treatment
-#                           diff        lwr        upr     p adj
-# -Cobalamin--Biotin   -3836.947 -6367.9759 -1305.9175 0.0055284
-# -Thiamine--Biotin     1244.290 -1286.7392  3775.3192 0.4425115
-# Replete--Biotin      -1133.363 -3664.3925  1397.6659 0.5146756
-# -Thiamine--Cobalamin  5081.237  2550.2075  7612.2659 0.0009184
-# Replete--Cobalamin    2703.583   172.5541  5234.6125 0.0368222
-# Replete--Thiamine    -2377.653 -4908.6825   153.3759 0.0657392
+```
+# Serial transfer 3 ANOVA and post-hoc multiple comparisons
+```{r}
+aov_max_3<-  aov(Max_Chl ~ Treatment, data = max_bio_3)
+TukeyHSD(aov_max_3)
+summary(aov_max_3)
+```
+# Serial transfer 4 Calculate maximum biomass 
+```{r}
+max_bio_4 <- fluor %>% filter(Round %in% c(4)) %>% # change serial transfer for calculations
+  filter(Treatment %in% c("-Cobalamin", "Replete", "-Thiamine","-Biotin")) %>%
+  group_by(Treatment, Round, Rep) %>% 
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE)) %>%
+  ungroup()
+```
+# Serial transfer 4 ANOVA and post-hoc multiple comparisons
+```{r}
+aov_max_4 <-  aov(Max_Chl ~ Treatment, data = max_bio_4)
+TukeyHSD(aov_max_4)
+summary(aov_max_4)
+```
 
- 
- #Round 2
-#  argument.            Df   Sum Sq  Mean Sq F value  Pr(>F)   
-# Treatment    3 57007804 19002601   10.86 0.00341 **
-# Residuals    8 13998941  1749868                   
-# ---
-# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
- 
- 
-#                           diff        lwr        upr     p adj
-# -Cobalamin--Biotin   -4507.493 -7966.2981 -1048.6886 0.0132230
-# -Thiamine--Biotin     1366.430 -2092.3747  4825.2347 0.6071688
-# Replete--Biotin      -1424.263 -4883.0681  2034.5414 0.5773879
-# -Thiamine--Cobalamin  5873.923  2415.1186  9332.7281 0.0027429
-# Replete--Cobalamin    3083.230  -375.5747  6542.0347 0.0816802
-# Replete--Thiamine    -2790.693 -6249.4981   668.1114 0.1195832
-# 
-#  
- 
- 
-#roun3
-#  `summarise()` has grouped output by 'Treatment', 'Round'. You can override using the `.groups` argument.            Df   Sum Sq  Mean Sq F value  Pr(>F)   
-# Treatment    3 45227786 15075929   10.08 0.00431 **
-# Residuals    8 11969898  1496237                   
-# ---
-# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
-#  
-#  
-#                          diff        lwr        upr     p adj
-# -Cobalamin--Biotin   -4507.493 -7966.2981 -1048.6886 0.0132230
-# -Thiamine--Biotin     1366.430 -2092.3747  4825.2347 0.6071688
-# Replete--Biotin      -1424.263 -4883.0681  2034.5414 0.5773879
-# -Thiamine--Cobalamin  5873.923  2415.1186  9332.7281 0.0027429
-# Replete--Cobalamin    3083.230  -375.5747  6542.0347 0.0816802
-# Replete--Thiamine    -2790.693 -6249.4981   668.1114 0.1195832
+```{r}
+aov_all <- aov(Max_Chl ~ Treatment*Rep , data = bind_rows(max_bio_1, max_bio_2, max_bio_3, max_bio_4))
+summary(aov_all)
 
- 
-#round4
-# `summarise()` has grouped output by 'Treatment', 'Round'. You can override using the `.groups` argument.            Df   Sum Sq  Mean Sq F value   Pr(>F)    
-# Treatment    3 37673712 12557904   36.81 4.99e-05 ***
-# Residuals    8  2729456   341182                     
-# ---
-# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
- 
-# 
-#                           diff        lwr        upr     p adj
-# -Cobalamin--Biotin   -2204.8900 -3732.16229  -677.6177 0.0073869
-# -Thiamine--Biotin     2680.3567  1153.08438  4207.6290 0.0022245
-# Replete--Biotin       -726.5033 -2253.77562   800.7690 0.4681009
-# -Thiamine--Cobalamin  4885.2467  3357.97438  6412.5190 0.0000331
-# Replete--Cobalamin    1478.3867   -48.88562  3005.6590 0.0577686
-# Replete--Thiamine    -3406.8600 -4934.13229 -1879.5877 0.0004466
+TukeyHSD(aov_all)
 
-
-``` 
-
-
-
-
+```
