@@ -1,0 +1,443 @@
+---
+title: "allexp"
+output: html_document
+date: "2025-03-19"
+---
+
+```{r}
+#install.packages("broom")  
+library(broom)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(lubridate)
+library(growthrates) 
+library(googlesheets4)
+library(scales)
+
+```
+
+#color pallete
+```{r my palette}
+pp_palette <- c(
+  "#7D8F69",  
+  "#C09F80", 
+  "#F5C45E",  
+  "#C1D3D5",  
+  "#B4975A" ,  
+  "#8A2D3B",
+  "#102E50"
+)
+
+scales::show_col(pp_palette)
+```
+
+#Import Data
+#OTB water
+```{r}
+OTB <- as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/1J7mcUc22TS7YU5_0qULqlZcLO_7sAfZMXJF4i6yO0k0/edit?gid=0#gid=0"))
+OTB$Time <- as.numeric(sub('.', '', OTB$Time))
+OTB$Date <- ymd(OTB$Date)
+OTB$Time <- OTB$Time * 48
+OTB %<>% filter(Treatment %in% c("-Cobalamin", "Replete", "-Thiamine", "-Biotin")) %>%  # Keep only desired treatments
+  mutate(Treatment = factor(Treatment, levels = c("-Cobalamin", "Replete",  "-Thiamine", "-Biotin"))) %>%  # Reassign levels
+  droplevels()  # Drop unused factor levels
+OTB$Time_in_Days <- OTB$Time / 24  # Convert Time from hours to days
+```
+
+
+#IRL water
+```{r}
+IRLrec<-as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/14vcZcv6T1SMArRUWgZT1R-BxI_K3nnAWk3APMDTx_ws/edit?gid=0#gid=0"))
+IRLrec$Time <- as.numeric(sub('.', '', IRLrec$Time))
+IRLrec$Date <- ymd(IRLrec$Date)
+IRLrec$Time <- IRLrec$Time * 48
+IRLrec$Time_in_Days <- IRLrec$Time / 24  # Convert Time from hours to days
+```
+
+
+#IRL culture
+```{r}
+IRLcul <- as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/152LJnHlyE7BVIg4P94l_wuC2RVi7gUhj8dogtArG-kc/edit?gid=0#gid=0"))
+
+# Remove periods and convert to numeric
+IRLcul$Time <- as.numeric(gsub("\\.", "", IRLcul$Time))  # Remove all periods
+# Convert Date column to Date type
+IRLcul$Date <- ymd(IRLcul$Date)
+IRLcul$Time <- IRLcul$Time * 48
+IRLcul$Time_in_Days <- IRLcul$Time / 24 
+
+```
+
+
+#Low diveristy
+```{r}
+fluor<-as.data.frame(read_sheet("https://docs.google.com/spreadsheets/d/1iD3GXey2Rg31hJI7V125ByjyR8TPvAD1kbDD4dR87VE/edit?usp=sharing"))
+fluor$Time <- as.numeric(sub('.', '', fluor$Time))
+fluor$Date <- ymd(fluor$Date)
+fluor$Time <- fluor$Time * 48
+
+fluor$Time_in_Days <- fluor$Time / 24 
+
+fluor %<>% 
+  filter(Treatment %in% c("-Cobalamin", "Replete", "-Thiamine", "-Biotin")) %>%  # Keep only desired treatments
+  mutate(Treatment = factor(Treatment, levels = c("-Cobalamin", "Replete",  "-Thiamine", "-Biotin"))) %>%  # Reassign levels
+  droplevels()  # Drop unused factor levels
+```
+
+# Combine all datasets into one with a new 'Dataset' column
+```{r spread of biomass}
+all_experiments <- bind_rows(
+  fluor %>% mutate(Dataset = "Low Diversity OTB"),
+  IRLcul %>% mutate(Dataset = "IRL culture microbiome"),
+  OTB %>% mutate(Dataset = "OTB water microbiome"),
+  IRLrec %>% mutate(Dataset = "IRL water microbiome")
+) %>%mutate(
+  Treatment = recode(Treatment,
+                     "-Cobalamin" = "\u2013B12",
+                     "-Biotin" = "\u2013Biotin",
+                     "-Thiamine" = "\u2013Thiamine"),
+  Treatment = factor(Treatment, levels = c("\u2013B12", "Replete"))
+) %>%
+  filter(Round %in% c(1, 2), Treatment %in% c("\u2013B12", "Replete"))
+
+
+```
+
+# Calculate mean Chlorphyll-a and standard deveation
+```{r}
+# Summarize mean/sd
+combined_avg <- all_experiments %>%
+  group_by(Time_in_Days, Treatment, Round, Dataset) %>%
+  summarise(
+    mean_chl = mean(`Chlorophyll-A (RFU)`, na.rm = TRUE),
+    sd_chl = sd(`Chlorophyll-A (RFU)`, na.rm = TRUE),
+    .groups = "drop"
+  )
+# Convert to numeric if it's character or factor
+combined_avg <- combined_avg %>%
+  mutate(Time_in_Days = as.numeric(as.character(Time_in_Days)))
+```
+
+#Prepare data for plotting
+```{r}
+all_experiments_plot <- combined_avg %>%
+  mutate(
+    Treatment = recode(Treatment,
+                       "-Cobalamin" = "—B12",
+                       "-Biotin" = "—Biotin",
+                       "-Thiamine" = "—Thiamine"),
+    Treatment = factor(Treatment, levels = c("—B12", "Replete")),
+    Dataset = factor(Dataset, levels = c(
+      "Low Diversity OTB",
+      "IRL culture microbiome",
+      "OTB water microbiome",
+      "IRL water microbiome"
+    ))
+  ) %>%
+  filter(Round %in% c(1, 2), Treatment %in% c("—B12", "Replete"))
+```
+#Plot growth curves 
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scales)
+ breaks = 10**(1:10)
+
+# Ensure numeric
+combined_avg <- combined_avg %>%
+  mutate(
+    Time_in_Days = as.numeric(as.character(Time_in_Days)),
+    Treatment = recode(Treatment,
+                       "–B12" = "—B12",  # en dash -> em dash
+                       "-Cobalamin" = "—B12",
+                       "-Biotin" = "—Biotin",
+                       "-Thiamine" = "—Thiamine"),
+    Treatment = factor(Treatment, levels = c("—B12", "Replete")),
+    Dataset = factor(Dataset, levels = c(
+      "Low Diversity OTB",
+      "IRL culture microbiome",
+      "OTB water microbiome",
+      "IRL water microbiome"
+    )),
+    Round = factor(Round)
+  ) %>%
+  filter(Round %in% c(1,2), Treatment %in% c("—B12", "Replete"))
+
+# Manual plot
+growth <- ggplot(combined_avg, aes(x = Time_in_Days, y = mean_chl, color = Treatment)) +
+  geom_point(size = 3)  + geom_smooth(se=FALSE)+
+  scale_color_manual(values = c("—B12" = "#102E50", "Replete" = "#F5C45E")) +
+  facet_grid(Round ~ Dataset) +
+  labs(
+    x = "Time (days)",
+    y = expression(paste("Chlorophyll-", italic("a"), " fluorescence (RFU)"))
+  ) +
+  scale_y_continuous(labels = label_comma())+
+    theme_minimal() +
+    theme(
+      panel.border = element_rect(fill = NA, color = "black"),
+      panel.grid = element_blank(),
+      axis.text.y = element_text(size = 16, color = "black"),
+      axis.text.x = element_text(hjust = 1, size = 16, color = "black"),
+      axis.title.y = element_text(size = 20, margin = margin(t = 10)),
+      axis.title.x = element_text(size = 20, margin = margin(t = 10)),
+      strip.text.x = element_text(size = 20),
+      strip.text = element_text(family = "Arial", size = 20, color = "black"),
+      legend.title = element_text(family = "Arial", size = 16, color = "black"),
+      legend.text = element_text(family = "Arial", size = 16, color = "black"),
+      legend.position = "bottom"
+    ) 
+growth
+```
+
+```{r create new variable for experimemt and combine experimental data into dataframe}
+fluor$Experiment <- "fluor"  
+IRLcul$Experiment <- "IRLcul"  
+OTB$Experiment <- "OTB"  
+IRLrec$Experiment <- "IRLwat"  
+
+all_exp <- bind_rows(fluor, IRLcul, OTB, IRLrec) %>%filter(Round %in% c(1, 2)) %>%
+  filter(Treatment %in% c("-Cobalamin", "Replete")) 
+```
+
+```{r calculate max biomass for each experiemmt}
+# Calculate max Chlorophyll-A for each Treatment × Round × Rep
+max_bio <- all_exp %>%
+  group_by(Treatment, Round, Bio_Rep,Experiment) %>%
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE), .groups = "drop") %>%
+  arrange(Treatment, Round, Bio_Rep)
+
+print(max_bio)
+```
+
+
+
+```{r calculate standatd deviation for mean maximum biomass }
+summary_stats <- max_bio %>%
+  group_by(Round, Experiment, Treatment) %>%
+  summarise(
+    mean_chl = mean(Max_Chl, na.rm = TRUE),
+    sd_chl = sd(Max_Chl, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#plot max biomass of each experimen in media -B12
+```{r plot maximum biomass}
+library(ggsignif)
+
+# Define comparisons: IRLwat vs each other experiment
+signif_comparisons <- list(
+  c("fluor", "IRLwat"),
+  c("IRLcul", "IRLwat"),
+  c("OTB", "IRLwat")
+)
+
+# Set desired experiment order
+experiment_order <- c("fluor", "IRLcul", "OTB", "IRLwat")
+
+max_bio <- ggplot(
+  dplyr::filter(max_bio, Treatment == "-Cobalamin") %>%
+    dplyr::mutate(
+      Experiment = factor(Experiment, levels = experiment_order)
+    ),
+  aes(x = Experiment, y = Max_Chl, color = Treatment)
+) +
+  # raw replicate points
+  geom_point(size = 3, alpha = 0.7, position = position_jitter(width = 0.15)) +
+  
+ geom_errorbar(
+  data = summary_stats %>%
+    dplyr::filter(Treatment == "-Cobalamin") %>%
+    dplyr::mutate(
+      Experiment = factor(Experiment, levels = experiment_order)
+    ),
+  aes(x = Experiment, y = mean_chl,
+      ymin = mean_chl - sd_chl, ymax = mean_chl + sd_chl,
+      color = Treatment),
+  width = 0.2, linewidth = 0.7, inherit.aes = FALSE
+) +
+
+# open circle for mean
+geom_point(
+  data = summary_stats %>%
+    dplyr::filter(Treatment == "-Cobalamin") %>%
+    dplyr::mutate(
+      Experiment = factor(Experiment, levels = experiment_order)
+    ),
+  aes(x = Experiment, y = mean_chl, color = Treatment),
+  shape = 21, size = 5, stroke = 1, inherit.aes = FALSE
+) +
+  
+  scale_y_continuous(labels = label_comma())+
+  facet_grid(~Round) +
+  
+  # axis labels
+  labs(
+    x = "Source",
+    y = expression(paste("Maximum RFU"))
+  ) +
+  
+  # legend for Treatment
+  scale_color_manual(
+    values = c("-Cobalamin" = "#102E50"),
+    labels = c("-Cobalamin" = expression("—B"[12])),
+    name = "Treatment",
+    guide = guide_legend(
+      override.aes = list(
+        shape = 21,
+        stroke = 1.2,
+        size = 2,
+        linetype = 1
+      ) ) ) +
+  theme_minimal()+ theme(
+  panel.border = element_rect(fill = NA, color = "black"),
+  panel.grid = element_blank(),
+  axis.text.y = element_text(size = 20, color = "black"),
+  axis.text.x = element_text(angle = 45, hjust = 1, size = 16, color = "black"),
+  axis.title.y = element_text(size = 20),
+  axis.title.x = element_text(size = 20, margin = margin(t = 10)),
+  strip.text.x = element_text(size = 20),
+  strip.text = element_text(family= "Arial", size = 20, color = "black"),
+  legend.title = element_text(family= "Arial", size = 16, color = "black"),
+  legend.text = element_text(family= "Arial", size = 16, color = "black"),
+  legend.position = "none",
+  legend.key.size = unit(1.5, "cm")
+) + 
+guides(color = "none", fill = "none", shape = "none")  +
+  
+  # Set visible range safely
+  coord_cartesian(ylim = c(50, 1500)) 
+  
+max_bio
+
+```
+ax biomass -b12 round 1
+
+```{r max biomass for treatments missing B12 in round 1}
+max_B12_r1 <- all_exp %>%
+  group_by(Experiment ,Treatment, Round, Bio_Rep) %>% 
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE)) %>%
+  ungroup()  %>% filter(Treatment %in% c("-Cobalamin"), Round %in% c(1))
+
+print(max_B12_r1)
+```
+
+```{r ANOVA of max biomass among experiments of treatments missing B12 in round 1}
+b12_r1_aov_biomass <- aov(Max_Chl ~ Experiment, data =max_B12_r1)
+summary(b12_r1_aov_biomass
+        )
+#             Df Sum Sq Mean Sq F value   Pr(>F)    
+# Experiment   3 882619  294206   29.58 0.000111 ***
+# Residuals    8  79572    9947                     
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+```
+
+```{r post-hoc comparision among experiments of treatments missing B12 in round 1}
+TukeyHSD(b12_r1_aov_biomass)
+```
+
+#Max biomass -b12 round 2
+
+```{r max biomass for treatments missing B12 in round 2}
+max_B12_r2 <- all_exp %>%
+  group_by(Experiment ,Treatment, Round, Bio_Rep) %>% 
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE)) %>%
+  ungroup()  %>% filter(Treatment %in% c("-Cobalamin"), Round %in% c(2))
+
+
+
+print(max_bio)
+```
+
+```{r ANOVA of max biomass among experiments of treatments missing B12 in round 2}
+b12_r2_aov_biomass <- aov(Max_Chl ~ Experiment, data =max_B12_r2)
+summary(b12_r2_aov_biomass
+        )
+
+#            Df  Sum Sq Mean Sq F value   Pr(>F)    
+# Experiment   3 1821331  607110     120 5.45e-07 ***
+# Residuals    8   40486    5061                     
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+```
+
+
+```{r post-hoc comparision among experiments of treatments missing B12 in round 2}
+TukeyHSD(b12_r2_aov_biomass)
+```
+
+# Combine plots version2
+```{r}
+bo <- 
+  growth / 
+  (max_bio + theme(legend.position = "none") +
+   IRL_mu + theme(legend.position = "none")) + 
+  plot_layout(
+   
+    guides = "collect",
+      # controls vertical space for rows
+    widths = c(4, 2)     # controls horizontal space for columns (if applicable)
+  ) &
+  theme(
+    legend.position = "bottom",
+    panel.spacing = unit(.1, "lines"),
+    plot.margin = margin(15, 15, 15, 15),
+    axis.title.y = element_text(margin = margin(r = 12)),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    legend.margin = margin(t = 4, b = 4),
+    legend.box.margin = margin(5, 5, 5, 5),
+    axis.text.x = element_text(size = 16)
+  )
+
+
+
+
+bo
+
+
+
+ggsave("recruit_2.png", height = 10, width =10,dpi=600 )
+```
+# Combine plots
+```{r}
+library(patchwork)
+library(grid)
+
+design <- "
+A
+B
+C
+"
+
+bo <- (
+  growth +                                  # keep legend from this one
+  max_bio + theme(legend.position = "none") +
+  IRL_mu + theme(legend.position = "none")
+) +
+  plot_layout(
+    design = design,
+    guides = "collect"                      # collect legend across plots
+  ) &
+  theme(
+    legend.position = "bottom",             # move collected legend to bottom
+    panel.spacing = unit(.1, "lines"),
+    plot.margin = margin(15, 15, 15, 1),
+    axis.title.y = element_text(margin = margin(r = 12)),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    legend.margin = margin(t = 4, b = 4),
+    legend.box.margin = margin(5, 5, 5, 5),
+    axis.text.x = element_text(size = 16)
+  )
+
+bo
+
+
+
+ggsave("recruit.png", height = 16, width =10,dpi=600 )
+```
+
