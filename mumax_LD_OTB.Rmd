@@ -1,0 +1,1177 @@
+---
+title: "mumax_LD_OTB"
+output: html_document
+date: "2025-08-26"
+---
+# Install packages 
+```{r}
+#install.packages("broom")  
+library(broom)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(lubridate)
+library(growthrates) 
+library(googlesheets4)
+library(ggsignif)
+```
+
+# Import data and calculate mumax 
+```{r fluor mumax}
+fluor <- as.data.frame(read_csv("fluor.csv"))
+
+# Remove periods and convert to numeric
+fluor$Time <- as.numeric(sub('.', '', fluor$Time))
+fluor$Time <- fluor$Time * 48  # convert to hours
+fluor$Time <-  fluor$Time / 24
+
+# Convert Date column to Date type
+fluor$Date <- mdy(fluor$Date)
+
+# -------------------------
+# 2. Function to process each treatment
+# -------------------------
+process_treatment <- function(fluor, treatment_name, levels_order) {
+  fluor_t <- fluor %>%
+    filter(Treatment == treatment_name, Round %in% 1:4) %>%
+    mutate(Treatment = factor(Treatment, levels = levels_order)) %>%
+    rename(Chl = `Chlorophyll-A (RFU)`) %>%
+    droplevels()
+  
+  # group by serial transfer and media treatment   
+  fluor_t %<>% group_by(Round, Treatment) %>% filter(n() > 4) %>% ungroup() %>% droplevels()
+  
+  # Fit splines
+  fits <- all_splines(Chl ~ Time | Round + Treatment + Rep, data = fluor_t, spar = 0.7)
+  
+  # Create dataframe with y0 and mumax
+  df <- data.frame(
+    ID = names(fits@fits),
+    y0 = sapply(fits@fits, function(fit) fit@par["y0"]),
+    mumax = sapply(fits@fits, function(fit) fit@par["mumax"])
+  )
+  
+  # Separate ID into components and clean
+  df <- df %>%
+    separate(ID, into = c("Round_tmp", "Treatment_ID", "Bio_Rep"), sep = ":", remove = FALSE) %>%
+    mutate(
+      Bio_Rep = as.numeric(Bio_Rep),
+      Transfer = as.numeric(sub("\\.y0$", "", Round_tmp)),  # base R
+      Treatment = treatment_name
+    ) %>%
+    select(-Round_tmp, -Treatment_ID)
+  
+  return(df)
+}
+
+# -------------------------
+# 3. Define treatments and order
+# -------------------------
+levels_order <- c("-Cobalamin", "Replete", "-Thiamine", "-Biotin")
+treatments <- levels_order
+
+# -------------------------
+# 4. Apply function to all treatments
+# -------------------------
+fluor_mumax_list <- lapply(treatments, function(trt) {
+  process_treatment(fluor, trt, levels_order)
+})
+
+# Combine all into one dataframe
+fluor_mumax_all <- bind_rows(fluor_mumax_list)
+
+# -------------------------
+# 5. Summarize μmax per treatment × transfer
+# -------------------------
+fluor_summary <- fluor_mumax_all %>%
+  group_by(Treatment, Transfer) %>%
+  summarise(
+    mean_mumax = mean(mumax, na.rm = TRUE),
+    se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+
+```
+# Visulaize growth curves in L1/4 -B12 media
+```{r}
+fluor_t <- fluor %>%
+  filter(Treatment == "-Cobalamin", Round %in% 1:4) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+fits <- all_splines(Chl ~ Time | Round + Treatment + Rep, data = fluor_t, spar = 0.7)
+
+# Plot
+par(mfrow = c(4, 6))
+par(mar = c(2.5, 4, 2, 1))
+plot(fits)
+```
+# Visulaize growth curves in L1/4 -Thiamine media
+```{r}
+fluor_t <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% 1:4) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+fits <- all_splines(Chl ~ Time | Round + Treatment + Rep, data = fluor_t, spar = 0.7)
+
+# Plot
+par(mfrow = c(4, 6))
+par(mar = c(2.5, 4, 2, 1))
+plot(fits)
+```
+
+# Visulaize growth curves in L1/4 -Biotin media
+```{r}
+fluor_t <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% 1:4) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+fits <- all_splines(Chl ~ Time | Round + Treatment + Rep, data = fluor_t, spar = 0.7)
+
+# Plot
+par(mfrow = c(4, 6))
+par(mar = c(2.5, 4, 2, 1))
+plot(fits)
+```
+
+# Visulaize growth curves in L1/4 -B12 media
+```{r}
+fluor_t <- fluor %>%
+  filter(Treatment == "-Replete", Round %in% 1:4) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+fits <- all_splines(Chl ~ Time | Round + Treatment + Rep, data = fluor_t, spar = 0.7)
+
+# Plot
+par(mfrow = c(4, 6))
+par(mar = c(2.5, 4, 2, 1))
+plot(fits)
+```
+
+
+
+
+# One way ANOVA and post-hoc multiple comparisons among media treatments
+```{r ANOVA and post hoc for treatment effet on mumax}
+anova_tables <- fluor_mumax_all %>%
+  group_by(Transfer) %>%
+  group_map(~ {
+    fit <- aov(mumax ~ Treatment, data = .x)
+    tidy(fit)  # tidy() from broom gives term, df, sumsq, meansq, statistic (F), p.value
+  }, .keep = TRUE)
+
+# Name each element of the list by Transfer
+names(anova_tables) <- unique(fluor_mumax_all$Transfer)
+
+anova_tables
+
+tukey_list <- by(fluor_mumax_all, fluor_mumax_all$Transfer, function(sub) {
+  fit <- aov(mumax ~ Treatment, data = sub)
+  TukeyHSD(fit)
+})
+
+tukey_list
+
+# > tukey_list
+#                               diff          lwr
+# -Cobalamin--Biotin   -0.0056006154 -0.007621513
+# -Thiamine--Biotin     0.0009185784 -0.001102319
+# Replete--Biotin      -0.0013294111 -0.003350309
+# -Thiamine--Cobalamin  0.0065191938  0.004498296
+# Replete--Cobalamin    0.0042712042  0.002250307
+# Replete--Thiamine    -0.0022479895 -0.004268887
+#                                upr        p adj
+# -Cobalamin--Biotin   -0.0035797180 9.519452e-05
+# -Thiamine--Biotin     0.0029394758 5.032167e-01
+# Replete--Biotin       0.0006914863 2.296790e-01
+# -Thiamine--Cobalamin  0.0085400912 3.105594e-05
+# Replete--Cobalamin    0.0062921016 6.478191e-04
+# Replete--Thiamine    -0.0002270921 3.024916e-02
+# ------------------------------------------- 
+#                               diff          lwr
+# -Cobalamin--Biotin   -0.0074260405 -0.009060218
+# -Thiamine--Biotin    -0.0003353783 -0.001969556
+# Replete--Biotin      -0.0018255544 -0.003459732
+# -Thiamine--Cobalamin  0.0070906622  0.005456484
+# Replete--Cobalamin    0.0056004860  0.003966308
+# Replete--Thiamine    -0.0014901762 -0.003124354
+#                                upr        p adj
+# -Cobalamin--Biotin   -0.0057918626 2.348801e-06
+# -Thiamine--Biotin     0.0012987996 9.101020e-01
+# Replete--Biotin      -0.0001913766 2.962112e-02
+# -Thiamine--Cobalamin  0.0087248401 3.333400e-06
+# Replete--Cobalamin    0.0072346639 1.974650e-05
+# Replete--Thiamine     0.0001440017 7.445667e-02
+# ------------------------------------------- 
+#                               diff          lwr
+# -Cobalamin--Biotin   -0.0070319103 -0.008763131
+# -Thiamine--Biotin     0.0006504005 -0.001080820
+# Replete--Biotin      -0.0005903000 -0.002321520
+# -Thiamine--Cobalamin  0.0076823109  0.005951091
+# Replete--Cobalamin    0.0064416103  0.004710390
+# Replete--Thiamine    -0.0012407006 -0.002971921
+#                                upr        p adj
+# -Cobalamin--Biotin   -0.0053006901 5.485339e-06
+# -Thiamine--Biotin     0.0023816208 6.419042e-01
+# Replete--Biotin       0.0011409202 7.039147e-01
+# -Thiamine--Cobalamin  0.0094135311 2.812781e-06
+# Replete--Cobalamin    0.0081728305 1.063089e-05
+# Replete--Thiamine     0.0004905197 1.783064e-01
+# ------------------------------------------- 
+#                              diff           lwr
+# -Cobalamin--Biotin   -0.007912866 -0.0090921468
+# -Thiamine--Biotin     0.000572355 -0.0006069254
+# Replete--Biotin      -0.001727903 -0.0029071830
+# -Thiamine--Cobalamin  0.008485221  0.0073059409
+# Replete--Cobalamin    0.006184964  0.0050056833
+# Replete--Thiamine    -0.002300258 -0.0034795381
+#                                upr        p adj
+# -Cobalamin--Biotin   -0.0067335859 8.363501e-08
+# -Thiamine--Biotin     0.0017516355 4.524940e-01
+# Replete--Biotin      -0.0005486221 6.771003e-03
+# -Thiamine--Cobalamin  0.0096645019 4.661584e-08
+# Replete--Cobalamin    0.0073642442 7.618230e-07
+# Replete--Thiamine    -0.0011209771 1.113994e-03
+
+```
+
+```{r}
+library(ggsignif)
+
+# Summary for error bars
+fluor_summary <- fluor_mumax_all %>%
+  group_by(Treatment, Transfer) %>%
+  summarise(
+    mean_mumax = mean(mumax, na.rm = TRUE),
+    se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+# Define comparisons
+signif_comparisons <- list(
+  c("Replete", "-Biotin"),
+  c("Replete", "-Thiamine")
+ 
+)
+
+
+ggplot(
+  subset(fluor_mumax_all, Treatment != "-Cobalamin"), 
+  aes(x = Treatment, y = mumax, color = Treatment)
+)  +
+  # geom_errorbar(data = fluor_summary,
+  #               aes(x = Treatment, y = mean_mumax,
+  #                   ymin = mean_mumax - se_mumax,
+  #                   ymax = mean_mumax + se_mumax),
+  #               width = 0.2, linewidth = 0.8) +
+  geom_point(size = 5, alpha = 0.6) +
+  geom_signif(comparisons = signif_comparisons,
+              y_position = c(1.1*max(fluor_mumax_all$mumax),
+                             1.15*max(fluor_mumax_all$mumax),
+                             1.2*max(fluor_mumax_all$mumax)),
+              tip_length = 0.03, color = "black",
+              annotations = "") +
+  scale_color_manual(values = c("-Cobalamin"="#102E50",
+                                "Replete"="#F5C45E",
+                                "-Thiamine"="deeppink4",
+                                "-Biotin"="#667028")) +
+  
+  scale_x_discrete(
+  labels = c(
+    "-Biotin"    = expression("\u2013Biotin"),         # en-dash
+    "-Cobalamin" = expression("\u2013B"[12]),          # en-dash + subscript 12
+    "-Thiamine"  = expression("\u2013Thiamine"),      
+    "Replete"    = "Replete"
+  )
+) +
+  facet_grid(~Transfer) +
+  theme_bw() +
+  theme_minimal() +theme(
+    panel.grid = element_blank(),       # removes all grid lines
+      # removes the black box around panel
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    plot.background = element_blank(),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14, color = "black"),
+    legend.text = element_text(size = 25),
+    legend.title = element_text(size = 25),
+    axis.title.y = element_text(size = 24),
+    axis.title.x = element_text(size = 25),
+    legend.position =  (position ="bottom")
+  ) +
+  labs(
+    x = "Media Treatment",
+    y = expression(paste("Maximum growth rate (", mu[max], ")"))
+  )
+```
+
+```{r}
+library(ggsignif)
+
+# Summary for error bars
+fluor_summary <- fluor_mumax_all %>%
+  group_by(Treatment, Transfer) %>%
+  summarise(
+    mean_mumax = mean(mumax, na.rm = TRUE),
+    se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+# Define comparisons
+signif_comparisons <- list(
+  c("Replete", "-Biotin"),
+  c("Replete", "-Thiamine"),
+  c( "Replete","-Cobalamin")
+)
+
+# Plot
+ggplot(fluor_mumax_all, aes(x = Treatment, y = mumax, color = Treatment)) +
+  # geom_errorbar(data = fluor_summary,
+  #               aes(x = Treatment, y = mean_mumax,
+  #                   ymin = mean_mumax - se_mumax,
+  #                   ymax = mean_mumax + se_mumax),
+  #               width = 0.2, linewidth = 0.8) +
+  geom_point(size = 4, alpha = 0.6) +
+  geom_signif(comparisons = signif_comparisons,
+              y_position = c(1.1*max(fluor_mumax_all$mumax),
+                             1.15*max(fluor_mumax_all$mumax),
+                             1.2*max(fluor_mumax_all$mumax)),
+              tip_length = 0.03, 
+              annotations = "", color = "black") +
+  scale_color_manual(values = c("-Cobalamin"="#102E50",
+                                "Replete"="#F5C45E",
+                                "-Thiamine"="deeppink4",
+                                "-Biotin"="#667028")) +
+  
+  scale_x_discrete(labels = c(
+    "-Cobalamin" = expression("-B"[12]),
+    "Replete"    = "Replete",
+    "-Thiamine"  = "-Thiamine",
+    "-Biotin"    = "-Biotin"
+  )) +
+  facet_grid(~Transfer) +
+  theme_bw() +
+  theme_minimal() +theme(
+    panel.grid = element_blank(),       # removes all grid lines
+      # removes the black box around panel
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    plot.background = element_blank(),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14, color = "black"),
+    legend.text = element_text(size = 25),
+    legend.title = element_text(size = 25),
+    axis.title.y = element_text(size = 24),
+    axis.title.x = element_text(size = 25),
+    legend.position =  (position ="bottom")
+  ) +
+  labs(
+    x = "Media Treatment",
+    y = expression(paste("Maximum growth rate (", mu[max], ")"))
+  )
+
+```
+
+# ALL Easy Linear method
+# -Thiamine
+```{r}
+thia <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% 1:4) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia, h = 4, quota = 1)
+
+par(mfrow = c(8, 6))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(thia_lin, log = "y")
+```
+#Remove outliers
+```{r}
+# 1️⃣ Compute T0 baseline per replicate, treatment, and round
+baseline <- aggregate(
+  `Chlorophyll-A (RFU)` ~ Rep + Treatment + Round,
+  data = subset(fluor, Time == 0),
+  FUN = mean,
+  na.rm = TRUE
+)
+names(baseline)[names(baseline) == "Chlorophyll-A (RFU)"] <- "Chl_T0"
+
+# Merge baseline back into the full dataset
+merged <- merge(fluor, baseline, by = c("Rep", "Treatment", "Round"), all.x = TRUE)
+
+# ⃣ Keep all T0 points, and remove any post-T0 points where replicate < its T0
+fluor_clean <- subset(
+  merged,
+  Time == 0 | `Chlorophyll-A (RFU)` >= Chl_T0
+)
+
+
+```
+    
+
+# ALL Easy Linear method
+# trial 1 calculating mumax for "-Thiamine", "-Biotin", & "Replete"
+```{r}
+trial1 <- fluor %>%
+  filter(Treatment %in% c("-Thiamine", "-Biotin", "Replete"), Round %in% 1) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+trial1_lin <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, trial1 , h = 7, quota = 1)
+
+par(mfrow = c(4, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(trial1_lin, log = "y")
+
+summary(trial1_lin)
+coef(trial1_lin)
+rsquared(trial1_lin)
+# 
+#                   y0    y0_lm     mumax        lag
+# 1:-Biotin:1    33.75 38.92188 0.2074863 -0.6871588
+# 1:-Thiamine:1 173.20 31.49697 0.2416543  7.0536952
+# 1:Replete:1    66.01 26.84907 0.2157266  4.1699773
+# 1:-Biotin:2    33.46 43.44102 0.2161749 -1.2076036
+# 1:-Thiamine:2  44.15 23.20350 0.2666038  2.4129054
+# 1:Replete:2    87.82 20.87905 0.2258538  6.3605019
+# 1:-Biotin:3    49.69 11.93456 0.2578427  5.5319204
+# 1:-Thiamine:3  33.19 28.00966 0.2600576  0.6525443
+# 1:Replete:3    94.03 27.03446 0.2201909  5.6610036
+# > rsquared(trial1_lin)
+#   1:-Biotin:1.r2 1:-Thiamine:1.r2   1:Replete:1.r2 
+#        0.9088927        0.9358222        0.9727947 
+#   1:-Biotin:2.r2 1:-Thiamine:2.r2   1:Replete:2.r2 
+#        0.9658730        0.9629722        0.9862601 
+#   1:-Biotin:3.r2 1:-Thiamine:3.r2   1:Replete:3.r2 
+#        0.9955119        0.9611167        0.9531494 
+# > 
+
+```
+# ALL Easy Linear method
+# trial 2 calculating mumax for "-Thiamine", "-Biotin", & "Replete"
+```{r}
+trial2 <- fluor %>%
+  filter(Treatment %in% c("-Thiamine", "-Biotin", "Replete"), Round %in% 2) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+trial2_lin <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, trial2 , h = 7, quota = 1)
+
+par(mfrow = c(4, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(trial2_lin, log = "y")
+
+summary(trial2_lin)
+coef(trial2_lin)
+rsquared(trial2_lin)
+# 
+#                 y0      y0_lm     mumax        lag
+# 2:-Biotin:1    98.46   5.125203 0.3760631  7.8590020
+# 2:-Thiamine:1 156.08  65.990742 0.2857329  3.0127933
+# 2:Replete:1    95.47  79.322722 0.1872621  0.9894552
+# 2:-Biotin:2    96.62  29.035114 0.2446627  4.9140308
+# 2:-Thiamine:2 131.83 112.273062 0.2336175  0.6873598
+# 2:Replete:2    75.69  78.832694 0.2068881 -0.1966365
+# 2:-Biotin:3   107.23  60.856127 0.2951547  1.9192091
+# 2:-Thiamine:3 140.09  62.000009 0.2917464  2.7940383
+# 2:Replete:3    51.77  29.617309 0.2403281  2.3237062
+# > rsquared(trial2_lin)
+#   2:-Biotin:1.r2 2:-Thiamine:1.r2   2:Replete:1.r2 
+#        0.8211458        0.9470493        0.9646965 
+#   2:-Biotin:2.r2 2:-Thiamine:2.r2   2:Replete:2.r2 
+#        0.9516543        0.9674307        0.8542034 
+#   2:-Biotin:3.r2 2:-Thiamine:3.r2   2:Replete:3.r2 
+#        0.9802552        0.9831967        0.9848147
+
+```
+
+# ALL Easy Linear method
+# trial 3 calculating mumax for "-Thiamine", "-Biotin", & "Replete"
+```{r}
+trial3 <- fluor %>%
+  filter(Treatment %in% c("-Thiamine", "-Biotin", "Replete"), Round %in% 3) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+trial3_lin <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, trial3 , h = 7, quota = 1)
+
+par(mfrow = c(4, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(trial3_lin, log = "y")
+
+summary(trial3_lin)
+coef(trial3_lin)
+rsquared(trial3_lin)
+```
+
+# ALL Easy Linear method
+# trial 4 calculating mumax for "-Thiamine", "-Biotin", & "Replete"
+```{r}
+trial4<- fluor %>%
+  filter(Treatment %in% c("-Thiamine", "-Biotin", "Replete"), Round %in% 4) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+trial4_lin <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, trial4 , h = 7, quota = 1)
+
+par(mfrow = c(4, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(trial4_lin, log = "y")
+
+summary(trial4_lin)
+coef(trial4_lin)
+rsquared(trial4_lin)
+```
+# ALL Easy Linear method
+# -Biotin round 1
+```{r}
+bio1 <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% c(1) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+bio_lin1 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, bio1, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(bio_lin1, log = "y")
+
+summary(bio_lin1)
+coef(bio_lin1)
+rsquared(bio_lin1)
+
+```
+# -Biotin round 2
+```{r}
+bio2 <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% c(2) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+bio_lin2 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, bio2, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(bio_lin2, log = "y")
+
+summary(bio_lin2)
+coef(bio_lin2)
+rsquared(bio_lin2)
+
+```
+
+# -Biotin round 3
+```{r}
+bio3 <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% c(3) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+bio_lin3 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, bio3, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(bio_lin3, log = "y")
+
+summary(bio_lin3)
+coef(bio_lin3)
+rsquared(bio_lin3)
+
+```
+
+# -Biotin round 4
+```{r}
+bio4 <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% c(4) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+bio_lin4 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, bio4, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(bio_lin4, log = "y")
+
+summary(bio_lin4)
+coef(bio_lin4)
+rsquared(bio_lin4)
+
+```
+
+
+
+# -thiamine round 1
+```{r}
+thia1 <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% c(1) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin1 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia1, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(thia_lin1, log = "y")
+
+summary(thia_lin1)
+coef(thia_lin1)
+rsquared(thia_lin1)
+
+
+
+```
+# -thiamine round 2
+```{r}
+thia2 <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% c(2) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin2 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia2, h = 9, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(thia_lin2, log = "y")
+
+summary(thia_lin2)
+coef(thia_lin2)
+rsquared(thia_lin2)
+```
+
+# -thiamine round 3
+```{r}
+thia3 <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% c(3) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin3 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia3, h = 9, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(thia_lin3, log = "y")
+
+summary(thia_lin3)
+coef(thia_lin3)
+rsquared(thia_lin3)
+```
+
+# -thiamine round 4
+```{r}
+thia4 <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% c(4) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin4 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia4, h = 9, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(thia_lin4, log = "y")
+
+summary(thia_lin4)
+coef(thia_lin4)
+rsquared(thia_lin4)
+```
+
+# ALL Easy Linear method
+# replete round 1
+```{r}
+rep1 <- fluor %>%
+  filter(Treatment == "Replete", Round %in% c(1)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+rep_lin1 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, rep1, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(rep_lin1, log = "y")
+
+summary(rep_lin1)
+coef(rep_lin1)
+rsquared(rep_lin1)
+
+```
+# replete round 2
+```{r}
+rep2 <- fluor %>%
+  filter(Treatment == "Replete", Round %in% c(2)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+rep_lin2 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, rep2, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(rep_lin2, log = "y")
+
+summary(rep_lin2)
+coef(rep_lin2)
+rsquared(rep_lin2)
+
+```
+# replete round 3
+```{r}
+rep3 <- fluor %>%
+  filter(Treatment == "Replete", Round %in% c(3)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+rep_lin3 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, rep3, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(rep_lin2, log = "y")
+
+summary(rep_lin3)
+coef(rep_lin3)
+rsquared(rep_lin3)
+
+```
+# replete round 2
+```{r}
+rep4 <- fluor %>%
+  filter(Treatment == "Replete", Round %in% c(4)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+rep_lin4 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, rep4, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(0.5, 0.5, 0.5, 0.5))
+plot(rep_lin2, log = "y")
+
+summary(rep_lin4)
+coef(rep_lin4)
+rsquared(rep_lin4)
+
+```
+
+#combine all mumax alues from each treatment
+```{r}
+
+extract_results <- function(model, treatment_name) {
+  coefs <- coef(model)
+  r2vals <- rsquared(model)
+  
+  df <- as.data.frame(coefs) %>%
+    tibble::rownames_to_column("Group") %>%
+    mutate(
+      Treatment = treatment_name,
+      r2 = r2vals
+    ) %>%
+    # Split "Group" into Round and Rep (Group looks like "1:-Thiamine:2")
+    tidyr::separate(Group, into = c("Round", "Treatment_label", "Rep"), sep = ":", remove = FALSE) %>%
+    mutate(Round = as.integer(Round))
+  
+  return(df)
+}
+
+# --- Extract Biotin rounds ---
+df_bio1 <- extract_results(bio_lin1, "-Biotin")
+df_bio2 <- extract_results(bio_lin2, "-Biotin")
+df_bio3 <- extract_results(bio_lin3, "-Biotin")
+df_bio4 <- extract_results(bio_lin4, "-Biotin")
+df_bio <- bind_rows(df_bio1, df_bio2, df_bio3, df_bio4)
+
+# --- Extract Thiamine rounds ---
+df_thia1 <- extract_results(thia_lin1, "-Thiamine")
+df_thia2 <- extract_results(thia_lin2, "-Thiamine")
+df_thia3 <- extract_results(thia_lin3, "-Thiamine")
+df_thia4 <- extract_results(thia_lin4, "-Thiamine")
+df_thia <- bind_rows(df_thia1, df_thia2, df_thia3, df_thia4)
+
+# --- Extract Replete rounds ---
+df_rep1 <- extract_results(rep_lin1, "Replete")
+df_rep2 <- extract_results(rep_lin2, "Replete")
+df_rep3 <- extract_results(rep_lin3, "Replete")
+df_rep4 <- extract_results(rep_lin4, "Replete")
+df_rep <- bind_rows(df_rep1, df_rep2, df_rep3, df_rep4)
+
+# --- Combine all treatments ---
+all_lin_results <- bind_rows(df_bio, df_thia, df_rep)
+
+# Optional: ensure Round is treated as a factor
+all_lin_results$Round <- factor(all_lin_results$Round)
+```
+# Plot mumaxes for Pyro grown in -Thiamine, -Biotin, and Replete media using function
+
+
+
+```{r}
+all_lin_results$Treatment <- factor(
+  all_lin_results$Treatment,
+  levels = c("-Cobalamin", "Replete", "-Thiamine", "-Biotin")
+)
+
+
+#  Only one comparison
+signif_comparisons <- list(c("Replete", "-Thiamine"))
+
+mu <- ggplot(all_lin_results, aes(x = Treatment, y = mumax, color = Treatment)) +
+  # Raw points
+  geom_point(size = 3, shape = 16, position = position_jitter(width = 0.1)) +
+  
+  # Mean ± SE
+  stat_summary(fun = mean, geom = "point", shape = 1, size = 5, stroke = 1.2) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2) +
+  
+  # # Significance bar only (no text)
+  # geom_signif(
+  #   comparisons = signif_comparisons,
+  #   annotations = "",         # no text
+  #   map_signif_level = FALSE, # don't map p-values
+  #   color = "black",
+  #   tip_length = 0.03,
+  #   y_position = 1.1 * max(all_lin_results$mumax)  # adjust as needed
+  # ) +
+  
+  facet_grid(~Round) +
+  
+  scale_color_manual(values = c(
+    "-Cobalamin" = "#102E50",
+    "Replete"    = "#F5C45E",
+    "-Thiamine"  = "deeppink4",
+    "-Biotin"    = "#667028"
+  )) +
+  
+  scale_x_discrete(labels = c(
+    "-Cobalamin" = expression("\u2212B"[12]),
+    "Replete"    = "Replete",
+    "-Thiamine"  = expression("\u2212Thiamine"),
+    "-Biotin"    = expression("\u2212Biotin")
+  )) +
+  
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    axis.title = element_text( size = 20),
+    axis.text = element_text( size = 20, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text( size = 20, color = "black"),
+    legend.title = element_blank(),
+    legend.text = element_blank(),
+    legend.key = element_blank()
+  ) +
+    labs(
+      x = "Media Treatment",
+      y = expression(paste("(", mu, ") RFU" * "\u00B7" * "day"^-1, " "))
+    )+
+  guides(color = "none", fill = "none", shape = "none")
+mu
+
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+# Keep all raw points
+all_points <- all_lin_results %>%
+  filter(Treatment %in% c("Replete", "-Thiamine", "-Biotin"))
+
+# Calculate mean ± SD across all rounds and replicates (one point per treatment)
+summary_stats <- all_points %>%
+  group_by(Treatment) %>%
+  summarise(
+    mean_mumax = mean(mumax, na.rm = TRUE),
+    sd_mumax   = sd(mumax, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Ensure factor ordering
+all_points$Treatment <- factor(all_points$Treatment, levels = c("Replete", "-Thiamine", "-Biotin"))
+summary_stats$Treatment <- factor(summary_stats$Treatment, levels = c("Replete", "-Thiamine", "-Biotin"))
+
+# Plot
+mu<- ggplot(all_points, aes(x = Treatment, y = mumax, color = Treatment)) +
+  
+  # All raw points (12 per treatment)
+  geom_point(size = 3, shape = 16, position = position_jitter(width = 0.1)) +
+  
+  # Error bars: mean ± SD across all replicates and rounds
+  geom_errorbar(
+    data = summary_stats,
+    aes(
+      x = Treatment,
+      y = mean_mumax,
+      ymin = mean_mumax - sd_mumax,
+      ymax = mean_mumax + sd_mumax,
+      color = Treatment
+    ),
+    width = 0.25,
+    inherit.aes = FALSE
+  ) +
+  
+  # Open circle for mean
+  geom_point(
+    data = summary_stats,
+    aes(x = Treatment, y = mean_mumax, color = Treatment),
+    shape = 21,
+    size = 5,
+    stroke = 1.2,
+    inherit.aes = FALSE
+  ) +
+   coord_cartesian(ylim = c(0, .45)) +
+  
+  scale_color_manual(
+    values = c(
+      "Replete"    = "#F5C45E",
+      "-Thiamine"  = "deeppink4",
+      "-Biotin"    = "#667028"
+    )
+  ) +
+    labs(
+      x = "Media Treatment",
+      y = expression(paste("(", mu, ") RFU" * "\u00B7" * "day"^-1, " "))
+    )+
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 16, color = "black"),
+    axis.title.y = element_text(size = 22),
+    axis.title.x = element_text(size = 20, margin = margin(t = 10)),
+    legend.position = "none",
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt")
+  ) +
+  guides(color = "none", fill = "none", shape = "none")
+
+mu
+
+
+
+
+```
+
+```{r}
+ggsave("LD_mumax.png", width = 10, height = 7)
+```
+#save in google
+```{r}
+# Save your dataframe to a new sheet
+sheet <- gs4_create(name = "mumax_LDOTB", sheets = list(data = all_lin_results))
+
+```
+#save plots as jpeg
+```{r}
+# Combine models by treatment
+all_models <- list(
+  Biotin   = list(bio_lin1, bio_lin2, bio_lin3, bio_lin4),
+  Thiamine = list(thia_lin1, thia_lin2, thia_lin3, thia_lin4),
+  Replete  = list(rep_lin1, rep_lin2, rep_lin3, rep_lin4)
+)
+
+# Open PDF device
+pdf("All_Treatments_Growth_Curves.pdf", width = 11, height = 8.5)  # Letter size
+
+# Loop through each treatment
+for(treatment_name in names(all_models)) {
+  
+  models <- all_models[[treatment_name]]
+  n <- length(models)
+  nrow <- ceiling(sqrt(n))
+  ncol <- ceiling(n / nrow)
+  
+  # Set up layout
+  par(mfrow = c(nrow, ncol), mar = c(3, 3, 2, 1))
+  
+  # Loop through each model
+  for(i in seq_along(models)) {
+    plot(models[[i]], log = "y")  # Plot without main
+    # Add title
+  }
+}
+
+# Close PDF device
+dev.off()
+
+
+```
+
+```{r}
+# Step 1: Extract coefficients table
+coef_table <- as.data.frame(coef(pyro_line_fits))
+
+# Step 2: Parse rownames by colon
+ids_df <- do.call(rbind, strsplit(rownames(coef_table), ":")) %>%
+          as.data.frame(stringsAsFactors = FALSE)
+
+# Step 3: Name the columns
+colnames(ids_df) <- c("Round", "Treatment", "Rep")
+
+# Step 4: Combine with mumax
+fluor_mumax_all <- cbind(ids_df, coef_table) %>%
+                    select(Round, Treatment, Rep, mumax)
+
+# Step 5 (optional): Convert numeric columns
+fluor_mumax_all$Round <- as.numeric(fluor_mumax_all$Round)
+fluor_mumax_all$Rep   <- as.numeric(fluor_mumax_all$Rep)
+fluor_mumax_all$mumax <- as.numeric(fluor_mumax_all$mumax)
+```
+# ANOVA for all easy linear
+```{r}
+all_lin_results$Round <- factor(all_lin_results$Round)
+
+linear <- aov(mumax ~ Treatment + Round, data = all_lin_results)
+summary(linear)
+TukeyHSD(linear)
+```
+# Combine each round’s models into one list
+```{r}
+library(dplyr)
+
+# 1️⃣ Function to extract all replicate slopes from a multiple_easylinear_fits object
+get_all_slopes <- function(model) {
+  sapply(model@fits, function(f) f@fit$coefficients["x"])
+}
+
+# 2️⃣ Build data frames for each round
+max_slope_1 <- data.frame(
+  Round = 1,
+  Treatment = rep(c("Biotin","Thiamine","Replete"), times = sapply(list(bio_lin1, thia_lin1, rep_lin1), function(m) length(m@fits))),
+  Rep = unlist(lapply(list(bio_lin1, thia_lin1, rep_lin1), function(m) seq_along(m@fits))),
+  Slope = unlist(lapply(list(bio_lin1, thia_lin1, rep_lin1), get_all_slopes))
+)
+
+max_slope_2 <- data.frame(
+  Round = 2,
+  Treatment = rep(c("Biotin","Thiamine","Replete"), times = sapply(list(bio_lin2, thia_lin2, rep_lin2), function(m) length(m@fits))),
+  Rep = unlist(lapply(list(bio_lin2, thia_lin2, rep_lin2), function(m) seq_along(m@fits))),
+  Slope = unlist(lapply(list(bio_lin2, thia_lin2, rep_lin2), get_all_slopes))
+)
+
+max_slope_3 <- data.frame(
+  Round = 3,
+  Treatment = rep(c("Biotin","Thiamine","Replete"), times = sapply(list(bio_lin3, thia_lin3, rep_lin3), function(m) length(m@fits))),
+  Rep = unlist(lapply(list(bio_lin3, thia_lin3, rep_lin3), function(m) seq_along(m@fits))),
+  Slope = unlist(lapply(list(bio_lin3, thia_lin3, rep_lin3), get_all_slopes))
+)
+
+max_slope_4 <- data.frame(
+  Round = 4,
+  Treatment = rep(c("Biotin","Thiamine","Replete"), times = sapply(list(bio_lin4, thia_lin4, rep_lin4), function(m) length(m@fits))),
+  Rep = unlist(lapply(list(bio_lin4, thia_lin4, rep_lin4), function(m) seq_along(m@fits))),
+  Slope = unlist(lapply(list(bio_lin4, thia_lin4, rep_lin4), get_all_slopes))
+)
+
+# 3️⃣ Run ANOVA + Tukey per round
+aov_1 <- aov(Slope ~ Treatment, data = max_slope_1)
+summary(aov_1)
+TukeyHSD(aov_1)
+
+aov_2 <- aov(Slope ~ Treatment, data = max_slope_2)
+summary(aov_2)
+TukeyHSD(aov_2)
+
+aov_3 <- aov(Slope ~ Treatment, data = max_slope_3)
+summary(aov_3)
+TukeyHSD(aov_3)
+
+aov_4 <- aov(Slope ~ Treatment, data = max_slope_4)
+summary(aov_4)
+TukeyHSD(aov_4)
+
+# 4️⃣ Combined ANOVA across all rounds with Rep as factor
+aov_all <- aov(Slope ~ Treatment*Rep, data = bind_rows(max_slope_1, max_slope_2, max_slope_3, max_slope_4))
+summary(aov_all)
+TukeyHSD(aov_all)
+
+```
+
+```{r}
+library(dplyr)
+
+all_slopes <- bind_rows(
+  max_slope_1,
+  max_slope_2,
+  max_slope_3,
+  max_slope_4
+)
+anova_summary <- data.frame(
+  Round = 1:4,
+  p_value = c(summary(aov_1)[[1]]["Treatment","Pr(>F)"],
+              summary(aov_2)[[1]]["Treatment","Pr(>F)"],
+              summary(aov_3)[[1]]["Treatment","Pr(>F)"],
+              summary(aov_4)[[1]]["Treatment","Pr(>F)"])
+)
+
+# Add to Google Sheet as a new tab
+sheet <- gs4_create("Growth_Slopes_ANOVA", sheets = list(Slopes = all_slopes))
+
+
+```
+
+```{r}
+library(ggsignif)
+
+# Summary for error bars
+fluor_summary <- fluor_mumax_all %>%
+  group_by(Treatment, Round) %>%
+  summarise(
+    mean_mumax = mean(mumax, na.rm = TRUE),
+    se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+# Define comparisons
+signif_comparisons <- list(
+  c("-Cobalamin", "-Biotin"),
+  c("-Cobalamin", "-Thiamine"),
+  c("-Cobalamin", "Replete")
+)
+
+# Plot
+ggplot(fluor_mumax_all, aes(x = Treatment, y = mumax, color = Treatment)) +
+  # geom_errorbar(data = fluor_summary,
+  #               aes(x = Treatment, y = mean_mumax,
+  #                   ymin = mean_mumax - se_mumax,
+  #                   ymax = mean_mumax + se_mumax),
+  #               width = 0.2, linewidth = 0.8) +
+  geom_point(size = 4, alpha = 0.6) +
+  geom_signif(comparisons = signif_comparisons,
+              y_position = c(1.1*max(fluor_mumax_all$mumax),
+                             1.15*max(fluor_mumax_all$mumax),
+                             1.2*max(fluor_mumax_all$mumax)),
+              tip_length = 0.03,
+              annotations = "") +
+  scale_color_manual(values = c("-Cobalamin"="#102E50",
+                                "Replete"="#F5C45E",
+                                "-Thiamine"="deeppink4",
+                                "-Biotin"="#667028")) +
+  scale_x_discrete(labels = c(
+    "-Cobalamin" = expression("-B"[12]),
+    "Replete"    = "Replete",
+    "-Thiamine"  = "-Thiamine",
+    "-Biotin"    = "-Biotin"
+  )) +
+  facet_grid(~Round) +
+  theme_bw() +
+  theme_minimal() +theme(
+    panel.grid = element_blank(),       # removes all grid lines
+      # removes the black box around panel
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    plot.background = element_blank(),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14, color = "black"),
+    legend.text = element_text(size = 25),
+    legend.title = element_text(size = 25),
+    axis.title.y = element_text(size = 24),
+    axis.title.x = element_text(size = 25),
+    legend.position =  (position ="bottom")
+  ) +
+  labs(
+    x = "Media Treatment",
+    y = expression(paste("Maximum growth rate (", mu[max], ")"))
+  )
+```
