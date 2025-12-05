@@ -1,0 +1,2439 @@
+---
+title: "Identifying B-vitamin requirements and phycosphere interactions for the HAB-forming dinoflagellate, Pyrodinium bahamense var. bahamense"
+date: "2025-12-02"
+Author: Lydia Ruggles
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    number_sections: true
+    theme: journal # optional — you can pick a theme you like
+    highlight: tango # optional
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+# load packages quietly
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+})
+```
+
+load packages:
+```{r}
+library(googlesheets4) #scrapes google sheets
+library(dplyr) # dataframe manipulation
+library(ggplot2) # plotting package
+library(lubridate)
+library(tidyr)
+library(readr)
+library(scales)
+library(growthrates) 
+library(patchwork)
+library(grid)
+library(qiime2R)
+library(phyloseq)
+library(viridis)
+library(magrittr)
+library(vegan)
+library(stringr)
+library(ape)
+
+```
+
+Create a color pallete
+```{r}
+pp_palette <- c(
+  # Original + Extended Palette (50 colors)
+  "#7D8F69", "cornflowerblue", "#F5C45E", "#C1D3D5", "plum",
+  "hotpink4", "lightsalmon", "steelblue", "indianred", "springgreen4", 
+   "#102E50", "maroon", "lightgreen", "lightblue", "gold",
+  "#BFA5A0", "#A26769", "blue", "red", "lightpink", 
+  "#71816D", "#FFE6E6", "#E5C1CD", "#A3B18A", "salmon", "magenta", "orchid","deepskyblue", "tomato",
+    "cyan", "hotpink", "yellow", "orange",
+   "#C0A98E", "#7A9E9F", "#A1869E", "#BFD8B8", "#F7DD72","green", "darkgreen","purple", 
+  "#FFE5AD",
+  "#CDB4DB"  
+)
+scales::show_col(pp_palette)
+```
+
+# Amplicons associated with P. bahamense isolates from Indian River Lagoon (IRL) (FWC1003) and Old Tampa Bay (OTB) FLorida (FWC1006)
+
+Import sequence data from QIIME 2:
+Amplicons were processed on a QIIME 2 pipeline, which includes DADA denoising. 
+Seqeunces were classified with Native Bayers Classifier
+```{r}
+ps<-qza_to_phyloseq(features="table.qza")
+```
+
+Import and prepare metadata:
+```{r}
+meta <- read.csv("SampleMetaData.csv")
+meta$SampleID <- paste0(meta$SampleID, "_6283")
+row.names(meta)<- meta$SampleID
+meta$TreatRep <- paste(meta$PCRDate_Treat, meta$SampleInfo_Rep,  sep = "_")
+#keep only the P. bahamense project
+pyro_only <- meta[grepl("^Pyro", meta$Project, ignore.case = TRUE), ]
+META <- sample_data(pyro_only)
+
+```
+
+Import and prepare taxonomy data:
+```{r}
+taxonomy <- read.csv("taxonomy.csv", stringsAsFactors = FALSE)
+
+names(taxonomy) <- c("row", "tax", "Confidence") 
+row.names(taxonomy) <-taxonomy[[1]] #move the feature ID column to become the row names
+taxonomy <- taxonomy[,(-1)] #delete the feature ID  column 
+taxonomy <-  separate(taxonomy, tax, c("Domain","Phylum", "Class", "Order", "Family", "Genus", "Species", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14"), sep = ";", fill = "right")
+taxonomy <- taxonomy[,c(1:7)] #keep first seven levels
+
+taxonomy$D0 <- with(taxonomy, ifelse(Order == " o__Chloroplast", "Chloroplast", "Bacteria")) #create column for ordering
+
+# Reorder columns and turn into phyloseq tax_table
+col_order<- c("D0", "Domain","Phylum", "Class", "Order", "Family", "Genus", "Species")
+taxonomy<- taxonomy[, col_order]
+taxmat <- as.matrix(taxonomy)
+TAX = tax_table(taxmat)
+```
+
+Subsetting the phyloseq object:
+```{r}
+#Keep only Pyro samples
+ps <- prune_samples(rownames(pyro_only), ps)
+
+#Remove OTUs that have zero counts in all Pyro samples
+ps <- prune_taxa(taxa_sums(ps) > 0, ps)
+ps <- merge_phyloseq(ps, TAX, META)
+
+```
+
+Bar plot at domain level:
+```{r, fig.width=10}
+#Keep only Bacteria + Chloroplast
+ps<- subset_taxa(ps, D0 %in% c("Bacteria", "Chloroplast") )
+
+#Convert counts to relative abundance (%)
+psra<- transform_sample_counts(ps, function(OTU) 100* OTU/sum(OTU)) 
+
+#Group OTU by DO level
+glomD1<- tax_glom(psra, 'D0')
+
+#plot RA
+taxabarplot <- plot_bar(glomD1, x = "SampleID", fill = "D0") +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_classic() +
+  theme(
+    legend.title = element_blank(),
+    text = element_text(size = 14),
+    axis.text.x = element_text(angle = 90)
+  ) +
+  ylab("Relative Abundance (%)") +
+  xlab("") +
+  scale_fill_manual(values = c("lightgrey", "#7BB03B")) +
+  facet_grid(~Project, scales = "free_x")
+
+
+taxabarplot
+```
+
+Remove chloroplast sequences from data:
+```{r}
+ps_nochloro <- subset_taxa(ps, Order != " o__Chloroplast" & Domain != "Unassigned")
+```
+
+Calculate observed richness:
+```{r}
+plugin <- ps_nochloro %>%
+            estimate_richness(measures = "Observed") %$% Observed
+
+#Pull project metadata field from phyloseq object
+Project <- ps_nochloro %>% sample_data %$% Project
+
+#Combine richness + project into one dataframe
+richness<- data.frame(plugin, Project)
+names(richness) <- c("richness", "Project")
+
+
+richness %>%group_by(Project) %>% summarize(mean = mean(richness), min = min(richness), max = max(richness))
+
+```
+
+Relative abundance and sums the counts of all OTUs that belong to the same Order:
+```{r}
+ps_nochloro_RA<- transform_sample_counts(ps_nochloro, function(OTU) 100* OTU/sum(OTU))
+
+ps_nochloro_RA_glomO<- tax_glom(ps_nochloro_RA, 'Order')
+
+```
+
+Bar plot at the order level: 
+```{r}
+# subset by pyro samples
+pyro <- subset_samples(ps_nochloro_RA_glomO, Project == "Pyro")
+
+# Remove low abundance orders
+pyro = filter_taxa(pyro, function(x) sum(x) > 1, TRUE)
+                       
+taxabarplot <- plot_bar(pyro, x= "SampleID", fill = "Order") +  scale_y_continuous(expand = c(0, 0)) + ggtitle("")  + theme(legend.title=element_blank()) + geom_bar(aes(fill=Order), stat="identity", position="stack", width =0.9) +theme_classic() + theme(text = element_text(size=14))+theme(axis.text.x = element_text(angle = 90)) + xlab("Sample") + ylab("Relative Abundance (%)") + theme(text = element_text(size=14)) + scale_fill_manual(values= pp_palette)+ xlab("")
+
+taxabarplot
+```
+
+Bar plot at family level:
+```{r}
+ps_nochloro_RA<- transform_sample_counts(ps_nochloro, function(OTU) 100* OTU/sum(OTU))
+
+#Group OTU by family and sum abundances
+ps_nochloro_RA_glomF<- tax_glom(ps_nochloro_RA, 'Family')
+
+#Keep only the Pyro samples
+pyro <- subset_samples(ps_nochloro_RA_glomF, Project == "Pyro")
+
+#Remove low abundance orders
+pyro = filter_taxa(pyro, function(x) sum(x) > 1, TRUE)
+                       
+taxabarplot<-plot_bar(pyro, x= "SampleID", fill = "Family") +  scale_y_continuous(expand = c(0, 0)) + ggtitle("")  + theme(legend.title=element_blank()) + geom_bar(aes(fill=Family), stat="identity", position="stack", width =0.9) +theme_classic() + theme(text = element_text(size=14))+theme(axis.text.x = element_text(angle = 90)) + xlab("Sample") + ylab("Relative Abundance (%)") + theme(text = element_text(size=14)) + scale_fill_manual(values= pp_palette)+ xlab("")
+
+taxabarplot
+```
+
+Parse data:
+```{r}
+#Filter SampleID
+pyroE <- subset_samples(pyro, !(SampleID %in% c("L14_6283", "L15_6283", "L17_6283", "L18_6283")))
+
+#Remove low abundance orders
+pyroE = filter_taxa(pyroE, function(x) sum(x) > 1, TRUE)
+                       
+taxabarplot<-plot_bar(pyroE, x= "SampleID", fill = "Family") +  scale_y_continuous(expand = c(0, 0)) + ggtitle("")  + theme(legend.title=element_blank()) + geom_bar(aes(fill=Family), stat="identity", position="stack", width =0.9) +theme_classic() + theme(text = element_text(size=14))+theme(axis.text.x = element_text(angle = 90)) + xlab("Sample") + ylab("Relative Abundance (%)") + theme(text = element_text(size=14)) + scale_fill_manual(values= pp_palette)+ xlab("")
+
+taxabarplot
+```
+
+
+Determine Unique OTU's and abundances in P. bahamense data:
+```{r}
+pE_m <- psmelt(pyroE)
+```
+
+```{r}
+unique(pE_m$OTU)
+```
+
+1. **12a986d7ed4f3be699daa0feaba41d8a**
+o__Rhizobiales
+ f__Hyphomicrobiaceae
+ g__Filomicrobium
+ s__uncultured_Alphaproteobacteria
+
+>12a986d7ed4f3be699daa0feaba41d8a
+GCAGCAGTGGGGAATATTGGACAATGGGCGAAAGCCTGATCCAGCCATGCCGCGTGAGTGACGAAGGCCTTAGGGTTGTAAAACTCTTTTGGCGGGGACGATAATGACGGTACCCGCAGAATAAGCCCCGGCTAACTTCGTGCCAGCAGCCGCGGTAATACGAAGGGGGCTAGCGTTGTTCGGAATCACTGGGCGTAAAGCGCACGTAGGCGGACTGGTCAGTTGGGGGTGAAATCCCAGGGCTCAACCCTGGAACTGCCTCCAATACTGCCAGTCTTGAGTCCGAGAGAGGTGAGTGGAATTCCTAGTGTAGAGGTGAAATTCGTAGATATTAGGAAGAACACCAGTGGCGAAGGCGGCTCACTGGCTCGGTACTGACGCTGAGGTGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+
+uncultured sanger sequence from Mangrove Sediment in Hong Kong - GenBank: MH091208.1,  MH091199.1 (2 best hits, 100% )
+Diversity and dynamics of microbial community structure in
+            different mangrove, marine and freshwater sediments during
+            anaerobic debromination of PBDEs
+            
+Diversity of salt marsh prokaryotes, M.A. Moran, uncultured Hyphomicrobiaceae bacterium -  lon=81.2797W, lat=31.3884N; sediment
+                     14-16cm collected on Feb 01, 2002, Sapelo Island Microbial
+                     Observatory Dean Creek Marsh sampling site" (3rd best hit 99%)    
+                     
+```{r}
+pE_m %>%  filter(OTU == "12a986d7ed4f3be699daa0feaba41d8a") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```
+
+
+4. **e0169d54945a8a584037e96365ec7bb3**
+ o__Rhizobiales
+ f__Hyphomicrobiaceae
+ g__Filomicrobium
+ s__uncultured_Alphaproteobacteria
+ 
+ >e0169d54945a8a584037e96365ec7bb3
+GCTGCAGTGGGGAATATTGGACAATGGGCGAAAGCCTGATCCAGCCATGCCGCGTGAGTGACGAAGGCCTTAGGGTTGTAAAACTCTTTTGGCGGGGACGATAATGACGGTACCCGCAGAATAAGCCCCGGCTAACTTCGTGCCAGCAGCCGCGGTAATACGAAGGGGGCTAGCGTTGTTCGGAATCACTGGGCGTAAAGCGCACGTAGGCGGACTGGTCAGTTGGGGGTGAAATCCCAGGGCTCAACCCTGGAACTGCCTCCAATACTGCCAGTCTTGAGTCCGAGAGAGGTGAGTGGAATTCCTAGTGTAGAGGTGAAATTCGTAGATATTAGGAAGAACACCAGTGGCGAAGGCGGCTCACTGGCTCGGTACTGACGCTGAGGTGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+ 
+ MH091208.1 uncultured bacteria - Diversity and dynamics of microbial community structure in
+            different mangrove, marine and freshwater sediments during
+            anaerobic debromination of PBDEs - isolation_source="mangrove sediments" in Hong Kong,  99%
+```{r}
+pE_m %>%  filter(OTU == "e0169d54945a8a584037e96365ec7bb3") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```
+
+6. **aa0c627da86b1ddbba980c9dfd6ac380**
+o__Rhizobiales
+ f__Hyphomicrobiaceae
+ g__Filomicrobium
+ s__uncultured_Alphaproteobacteria
+
+>aa0c627da86b1ddbba980c9dfd6ac380
+GCAGCAGTGGGGAATATTGGACAATGGGCGAAAGCCTGATCCAGCCATGCCGCGTGAGTGACGAAGGCCTTAGGGTTGTAAAACTCTTTTGGCGGGGACGATAATGACGGTACCCGCAGAATAAGCCCCGGCTAACTTCGTGCCAGCAGCCGCGGTAATACGAAGGGGGCTAGCGTTGTTCGGAATCACTGGGCGTAAAGCGCACGTAGGCGGACTGGTCAGTTGGGGGTGAAATCCCAGGGCTCAACCCTGGAACTGCCTCCAATACTGCCAGTCTTGAGTCCGAGAGAGGTGAGTGGAATTCCTAGTGTAGAGGTGAAATTCGTAGATATTAGGAAGAACACCAGTGGCGAAGGCGACTCACTGGCTCGGTACTGACGCTGAGGTGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+
+MH091208.1 uncultured bacteria - Diversity and dynamics of microbial community structure in
+            different mangrove, marine and freshwater sediments during
+            anaerobic debromination of PBDEs - Hong Kong isolation_source="mangrove sediments" , 99%
+```{r}
+pE_m %>%  filter(OTU == "aa0c627da86b1ddbba980c9dfd6ac380") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```
+            
+9. **f6a0f1f2d2a083164d1fb145b000b96b**
+
+o__Rhizobiales
+ f__Hyphomicrobiaceae
+ g__Filomicrobium
+ s__uncultured_Alphaproteobacteria
+
+
+>f6a0f1f2d2a083164d1fb145b000b96b
+GCAGCAGTGGGGAATATTGGACAATGGGCGAAAGCCTGATCCAGCCATGCCGCGTGAGTGACGAAGGCCTTAGGGTTGTAAAACTCTTTTGGTGGGGACGATAATGACGGTACCCGCAGAATAAGCCCCGGCTAACTTCGTGCCAGCAGCCGCGGTAATACGAAGGGGGCTAGCGTTGTTCGGAATCACTGGGCGTAAAGCGCACGTAGGCGGACTGGTCAGTTGGGGGTGAAATCCCAGGGCTCAACCCTGGAACTGCCTCCAATACTGCCAGTCTTGAGTCCGAGAGAGGTGAGTGGAATTCCTAGTGTAGAGGTGAAATTCGTAGATATTAGGAAGAACACCAGTGGCGAAGGCGGCTCACTGGCTCGGTACTGACGCTGAGGTGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+ 
+MH091208.1 Uncultured bacteria Diversity and dynamics of microbial community structure in
+            different mangrove, marine and freshwater sediments during
+            anaerobic debromination of PBDEs - isolation_source="mangrove sediments" - 99%
+
+
+```{r}
+pE_m %>%  filter(OTU == "f6a0f1f2d2a083164d1fb145b000b96b") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```        
+            
+8. **ff08ec2d8a67e142bc459567275bb888**
+ o__Rhizobiales
+ f__Hyphomicrobiaceae
+ g__Filomicrobium
+ s__uncultured_Alphaproteobacteria
+ 
+ >ff08ec2d8a67e142bc459567275bb888
+GCAGCAGTGGGGAATATTGGACAATGGGCGAAAGCCTGATCCAGCCATGCCGCGTGAGTGACGAAGGCCTTAGGGTTGTAAAACTCTTTTGGCGGGGACGATAATGACGGTACCCGCAGAATAAGCCCCGGCTAACTTCGTGCCAGCAGCCGCGGTAATACGAAGGGGGCTAGCGTTGTTCGGAATCACTGGGCGTAAAGCGCACGTAGGCGGACTGGTCAGTTGGGGGTGAAATCCCAGGGCTCAACCCTGGAACTGCCTCCAATACTGCCAGTCTTGAGTCCGAGAGAGGTGACTGGAATTCCTAGTGTAGAGGTGAAATTCGTAGATATTAGGAAGAACACCAGTGGCGAAGGCGGCTCACTGGCTCGGTACTGACGCTGAGGTGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+ 
+MH091208.1 uncultured bacteria Diversity and dynamics of microbial community structure in
+            different mangrove, marine and freshwater sediments during
+            anaerobic debromination of PBDEs Hong Kong isolation_source="mangrove sediments" 99%
+            
+            
+EU488009.1 uncultured bacteria  Characterization of the lucinid bivalve-bacteria symbiotic system:
+            the significance of the geochemical habitat on bacterial symbiont
+            diversity and phylogeny isolation_source="siliciclastic sedment from Thalassia
+                     sea grass bed" 99%
+
+
+other marine sediments, estuary sediments 
+```{r}
+pE_m %>%  filter(OTU == "ff08ec2d8a67e142bc459567275bb888") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```  
+
+
+-----
+
+2. **07ae9a3ebf44d4a821d001debe7d9b0c**  
+  c__Acidimicrobiia
+ o__Microtrichales
+ f__uncultured
+ g__uncultured
+  NA
+
+>07ae9a3ebf44d4a821d001debe7d9b0c
+GCAGCAGTGGGGAATCTTGCGCAATGGGCGAAAGCCTGACGCAGCGACGCCGCGTGCGGGAAGACGGCCTTCGGGTTGTAAACCGCTTTCAGCAGGGACGAAATTGACGGTACCTGCAGAAGAAGCTCCGGCCAACTACGTGCCAGCAGCCGCGGTAAGACGTAGGGGGCGAGCGTTGTCCGGAATCATTGGGCGTAAAGGGCTCCTAGGTGGTTCAGTAAGTCGACTGTGAAAATCCAAGGCTCAACCTTGGGACGCCAGTCGATACTGCTGTGACTCGAGTTCGGTAGAGGAGTGTGGAATTCCTGGTGTAGCGGTGAAATGCGCAGATATCAGGAGGAACACCAACGGCGAAGGCAGCACTCTGGGCCGATACTGACACTGAAGAGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+
+KM840989.1 uncultured bacteria - Microbial diversity of indigenous bacteria in a 129I contaminated
+            groundwater plume at the Hanford Site, Washington - Sanger, isolation_source="iodine (I-129) contaminated
+                     groundwater" 100%
+                     
+HF558551.1 uncultured bacteria - Iron- and Sulphur- cycling bacteria mobilize copper in a multiple
+            extreme mine tailings in the Atacama Desert, Chile -  isolation_source="tailing material" -　100%
+            
+JQ427269.1 uncultured bacteria  - Bacterial diversity in an alkaline saline soil spiked with
+            anthracene, samger sequenced,  isolation_source="soil", 100%
+            
+JQ665390.1 uncultured actinobacterium, Diversity of unculturable Actinomycetes in coastal wetlands of the
+            Yellow River estuary, isolation_source="soil sample from coastal wetlands", 99%
+  
+```{r}
+pE_m %>%  filter(OTU == "07ae9a3ebf44d4a821d001debe7d9b0c") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```          
+            
+ 5. **9b8accad19c30d7a69a6290553111166**
+ c__Acidimicrobiia
+ o__Microtrichales
+ f__uncultured
+ g__uncultured
+  NA
+  
+>9b8accad19c30d7a69a6290553111166
+GCTGCAGTGGGGAATCTTGCGCAATGGGCGAAAGCCTGACGCAGCGACGCCGCGTGCGGGAAGACGGCCTTCGGGTTGTAAACCGCTTTCAGCAGGGACGAAATTGACGGTACCTGCAGAAGAAGCTCCGGCCAACTACGTGCCAGCAGCCGCGGTAAGACGTAGGGGGCGAGCGTTGTCCGGAATCATTGGGCGTAAAGGGCTCCTAGGTGGTTCAGTAAGTCGACTGTGAAAATCCAAGGCTCAACCTTGGGACGCCAGTCGATACTGCTGTGACTCGAGTTCGGTAGAGGAGTGTGGAATTCCTGGTGTAGCGGTGAAATGCGCAGATATCAGGAGGAACACCAACGGCGAAGGCAGCACTCTGGGCCGATACTGACACTGAAGAGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+
+KM840989.1  uncultured bacteria - Microbial diversity of indigenous bacteria in a 129I contaminated
+            groundwater plume at the Hanford Site, Washington - isolation_source="iodine (I-129) contaminated
+                     groundwater" - 99%
+```{r}
+pE_m %>%  filter(OTU == "9b8accad19c30d7a69a6290553111166") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```                     
+    
+----- 
+
+
+3. **e9034a72595933ebd5c5df08eb4a08fc**
+o__Oceanospirillales
+ f__Alcanivoracaceae1
+ g__Alcanivorax
+ s__Alcanivorax_venustensis
+
+>e9034a72595933ebd5c5df08eb4a08fc
+GCAGCAGTGGGGAATCTTGGACAATGGGGGCAACCCTGATCCAGCCATGCCGCGTGTGTGAAGAAGGCCTTCGGGTTGTAAAGCACTTTCAGCAGGGAGGAAGGCTTACCCCTAATACGGGTGAGTACTTGACGTTACCTGCAGAAGAAGCACCGGCTAATTTCGTGCCAGCAGCCGCGGTAATACGAAAGGTGCAAGCGTTAATCGGAATTACTGGGCGTAAAGCGCGCGTAGGCGGTGTGTTAAGTCGGATGTGAAAGCCCAGGGCTCAACCTTGGAATTGCATCCGATACTGGCACGCTAGAGTGCAGTAGAGGGAGGTGGAATTTCCGGTGTAGCGGTGAAATGCGTAGAGATCGGAAGGAACACCAGTGGCGAAGGCGGCCTCCTGGACTGACACTGACGCTGAGGTGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+
+PP516259.1 organism="Alloalcanivorax venustensis" Exploration and conservation of bacterial community from the
+            Arabian Sea seamount isolation_source="Arabian Sea water", 100%
+            
+```{r}
+pE_m %>%  filter(OTU == "e9034a72595933ebd5c5df08eb4a08fc") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```   
+
+----
+
+
+7. **c02844d75d512c1510de7334b6687731**
+ o__Rhizobiales
+ f__Hyphomicrobiaceae
+ g__uncultured
+ s__uncultured_bacterium
+ 
+ >c02844d75d512c1510de7334b6687731
+GCAGCAGTGGGGAATATTGGACAATGGGCGAAAGCCTGATCCAGCCATGCCGCGTGAGTGACGAAGGCCTTAGGGTTGTAAAGCTCTTTTGGCGGGGAAGATAATGACGGTACCCGCAGAATAAGCTCCGGCTAACTTCGTGCCAGCAGCCGCGGTAATACGAAGGGAGCTAGCGTTGTTCGGAATCACTGGGCGTAAAGCGCACGTAGGCGGATTTGTTAGTCAGGGGTGAAATCCCGGGGCTCAACCCCGGAACTGCCTTTGATACTGCAAATCTCGAGTCCGAGAGAGGTGGGTGGAATTCCTAGTGTAGAGGTGAAATTCGTAGATATTAGGAAGAACACCGGTGGCGAAGGCGGCCCACTGGCTCGGTACTGACGCTGAGGTGCGAAAGCGTGGGGAGCAAACAGGATTAGATAC
+
+
+OK235762.1 Uncultured Pedomicrobium sp.  isolation_source="date palm rhizosphere soil" Saudi Arabia - 99%
+
+HQ697761.1 Uncultured bacteria isolation_source="hydrocarbon contaminated saline-alkali
+                     soil" China - 99%
+                     
+                     
+99% to several other contaminated soil sites (real and experimental)
+
+ KP098952.1 Uncultured bacteria - The microbiome of methanol-utilizing denitrification systems
+            contains new bacterial groups - isolation_source="denitrification bioreactor" - 99%
+
+```{r}
+pE_m %>%  filter(OTU == "c02844d75d512c1510de7334b6687731") %>%  summarize(mean = mean(Abundance), min = min(Abundance), max = max(Abundance))
+```  
+
+
+
+Plot shannon diversity and relative abundance:
+```{r}
+# -------------------------------
+# Subset Pyro samples and filter
+# -------------------------------
+pyro <- subset_samples(ps_nochloro_RA_glomO, Project == "Pyro")
+pyro <- subset_samples(pyro, Treatment != "AB")
+pyro <- filter_taxa(pyro, function(x) sum(x) > 1, TRUE)
+pyro <- subset_samples(pyro, 
+                       Treatment %in% c("1003", "Replete") & 
+                       TreatRep %in% c("1003_1", "1_2"))
+
+# Set factor levels for Notes_Filter
+pyro@sam_data$Notes_Filter <- factor(as.character(pyro@sam_data$Notes_Filter),
+                                     levels = c("10", "2"))
+
+# Clean Order names in tax_table
+tax_table(pyro)[, "Order"] <- gsub(" o__", "", tax_table(pyro)[, "Order"])
+
+# -------------------------------
+# Plot relative abundance barplot
+# -------------------------------
+barplot <- plot_bar(pyro, x = "TreatRep", fill = "Order") +
+  geom_bar(aes(fill = Order), stat = "identity", position = "stack", width = 1) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = pp_palette) +
+  facet_grid(Notes_Filter ~ Treatment, scales = "free") +
+  scale_x_discrete(
+    expand = c(0.5, 0.05),
+    labels = c(
+      "1003_1" = "IRL",
+      "1_2"    = "OTB"
+    )
+  ) +
+  theme_classic() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "right",
+    legend.justification = "center",
+    legend.box = "horizontal",
+    axis.text.x = element_text(angle = 0, vjust = 0.5, size = 16, color = "black"),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.title.x = element_text(size = 20, color = "black"),
+    axis.title.y = element_text(size = 20, color = "black"),
+    axis.ticks.x = element_line(color = "black", linewidth = 0.9),
+    axis.ticks.y = element_line(color = "black", linewidth = 0.9),
+    strip.text.x = element_blank(),  # remove top facet labels
+    strip.text.y = element_text(size = 20, color = "black"), # row facets
+    text = element_text(size = 20, color = "black")
+  ) +
+  ylab(expression("Relative Abundance (%)")) +
+  xlab("")
+
+barplot
+# -------------------------------
+# Calculate Shannon index
+# -------------------------------
+pyro <- subset_samples(ps_nochloro_RA_glomO, Project == "Pyro")
+pyro <- subset_samples(pyro, TreatRep %in% c("1003_1", "1_2", "1_1", "1_3"))
+pyro <- subset_samples(pyro, Treatment != "AB")
+
+shannon_df <- estimate_richness(pyro, measures = "Shannon")
+
+# Extract metadata and combine with diversity
+sample_meta <- as(sample_data(pyro), "data.frame")
+shannon_df <- cbind(shannon_df, sample_meta)
+
+# -------------------------------
+# Plot Shannon diversity
+# -------------------------------
+shannon_plot <- ggplot(shannon_df, aes(x = Treatment, y = Shannon, color = Notes_Filter)) +
+  
+  # Color mapping
+  scale_color_manual(values = c("10" = "navy", "2" = "maroon")) +
+  
+  # Points
+  geom_point(size = 5) +
+  
+  # Custom x-axis labels
+  scale_x_discrete(labels = c(
+    "1003" = "IRL",
+    "Replete" = "OTB"
+  )) +
+  
+  # Classic theme
+  theme_classic() +
+  
+  # Axis labels
+  ylab("Shannon Diversity Index") +
+  xlab("") +
+  labs(color = "Filter Size") +  
+
+  # Theme adjustments
+  theme(
+    legend.title = element_text(size = 20),
+    axis.text.x = element_text(angle = 0, vjust = 0.5, size = 16, color = "black"),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.title.x = element_text(size = 20, color = "black"),
+    axis.title.y = element_text(size = 20, color = "black"),
+    axis.ticks.x = element_line(color = "black", linewidth = 0.9),
+    axis.ticks.y = element_line(color = "black", linewidth = 0.9),
+    strip.text.x = element_blank(),  # remove top facet labels
+    strip.text.y = element_text(size = 20, color = "black"), # row facets
+    text = element_text(size = 20, color = "black"))
+
+# Print Shannon plot
+shannon_plot
+
+```
+
+## Figure 2
+```{r fig.width=10, fig.height=5}
+bo <- shannon_plot + barplot
+bo
+```
+
+# Growth of a Low-Diversity P. bahamense Isolate
+
+Chlorophyll-a fluorescence (RFU) data from P. bahamense cultures were used to  visualize growth patterns, quantify maximum biomass, and estimate specific growth rates under media conditions deficient in media lacking one targeted B vitamin. Specific growth rates were computed using the  “alleasy_linear” function of the “growthrates” package in R Studio (Hall et al., 2014; RStudio Team, 2020).
+
+Import the Dataset:
+```{r}
+fluor<-as.data.frame(read_csv("fluor.csv"))
+fluor$Time <- as.numeric(sub('.', '', fluor$Time))
+fluor$Date <- mdy(fluor$Date)
+fluor$Time <- fluor$Time * 48 /24
+```
+
+## Visulaize growth:
+```{r fig.width=10, fig.height=8}
+LD_OTB_all_growth <- ggplot(
+ fluor %>%
+    filter(
+      Treatment %in% c("-Cobalamin", "Replete", "-Thiamine", "-Biotin"),
+      Round %in% c(1, 2,3,4)),
+  aes(x = Time, y = `Chlorophyll-A (RFU)`, color = Treatment)) +
+  geom_point(size = 3)  + geom_smooth(se=FALSE)+
+  # Manual color scale
+  scale_color_manual(
+    values = c(
+      "-Cobalamin" = "#102E50",
+      "Replete"    = "#F5C45E",
+      "-Thiamine"  = "deeppink4",
+      "-Biotin"    = "#667028"
+    ),
+    labels = c(
+      "-Cobalamin" = expression(" —B"[12]),
+      "-Thiamine"  = expression("—thiamine"),
+      "-Biotin"    = expression("—biotin"),
+      "Replete"    = "replete"),
+    name = "Treatment") +
+ labs(
+    x = "Time (days)",
+    y = expression(paste("Chlorophyll-", italic("a"), " fluorescence (RFU)"))
+  ) +
+  facet_grid(~Round) +
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.grid = element_blank(),
+    axis.title = element_text(size = 20),
+    axis.text  = element_text(size = 20, color = "black"),
+    strip.text = element_text(size = 20, color = "black"),
+    legend.title = element_text(size = 18, color = "black"),
+    legend.text  = element_text(size = 18, color = "black"),
+    legend.position = "bottom",
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt")
+  )
+
+LD_OTB_all_growth
+```
+
+## Calculate maximum RFU values for each round and medium treatment
+```{r max biomass}
+max_bio <- fluor %>%
+  filter(Round %in% c(1, 2, 3, 4)) %>%
+  filter(Treatment %in% c("-Cobalamin", "Replete", "-Biotin", "-Thiamine")) %>%
+  group_by(Treatment, Round, Rep) %>%
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE), .groups = "drop")
+
+print(max_bio)
+```
+
+Run an ANOVA on maximum RFU values and Tukey HSD post-hoc test for treatment
+```{r}
+aov_max_bio <-  aov(Max_Chl ~ Treatment, data = max_bio)
+TukeyHSD(aov_max_bio)
+summary(aov_max_bio)
+```
+
+Prepare data for plotting maximum RFU values:
+```{r}
+# Calculate mean and SD
+summary_stats <- max_bio %>%
+  group_by(Treatment, Round) %>%
+  summarise(
+    mean_chl = mean(Max_Chl, na.rm = TRUE),
+    sd_chl   = sd(Max_Chl, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Make Treatment a factor in both datasets
+max_bio$Treatment <- factor(max_bio$Treatment, 
+                            levels = c( "-Biotin", "-Cobalamin","-Thiamine", "Replete"))
+
+summary_stats$Treatment <- factor(summary_stats$Treatment, 
+                                  levels = c("-Cobalamin", "-Thiamine", "-Biotin", "Replete"))
+
+max_bio$Treatment <- factor(
+  max_bio$Treatment,
+  levels = c("-Cobalamin", "Replete", "-Thiamine", "-Biotin")
+)
+
+summary_stats$Treatment <- factor(
+  summary_stats$Treatment,
+  levels = c("-Cobalamin", "Replete", "-Thiamine", "-Biotin"))
+```
+
+Plot maximum RFU values:
+```{r}
+max_bio_LD <- ggplot(max_bio, aes(x = Treatment, y = Max_Chl, color = Treatment)) +
+  
+  # Raw points (per round)
+  geom_point(size = 3, shape = 16, position = position_jitter(width = 0.1)) +
+  
+  # Error bars: mean ± SD across replicates
+  geom_errorbar(
+    data = summary_stats,
+    aes(
+      x = Treatment,
+      y = mean_chl,
+      ymin = mean_chl - sd_chl,
+      ymax = mean_chl + sd_chl,
+      color = Treatment
+    ),
+    width = 0.3,
+    position = position_dodge(width = 0.6),
+    inherit.aes = FALSE
+  ) +
+  
+  # Open circles for replicate-averaged means
+  geom_point(
+    data = summary_stats,
+    aes(x = Treatment, y = mean_chl, color = Treatment),
+    shape = 21,
+    size = 5,
+    stroke = 1.2,
+    position = position_dodge(width = 0.6),
+    inherit.aes = FALSE
+  ) +
+  
+  # Labels
+  labs(
+    x = "Media Treatment",
+    y = expression(paste("Maximum RFU"))
+  ) +
+  
+  # Manual colors
+  scale_color_manual(
+    values = c(
+      "-Cobalamin" = "#102E50",
+      "-Thiamine"  = "deeppink4",
+      "-Biotin"    = "#667028",
+      "Replete"    = "#F5C45E"
+    ),
+    labels = c(
+      "-Cobalamin" = expression("—B"[12]),
+      "-Thiamine"  = expression("—Thiamine"),
+      "-Biotin"    = expression("—Biotin"),
+      "Replete"    = "Replete"
+    ),
+    name = "Treatment",
+    guide = guide_legend(
+      override.aes = list(
+        shape = 21,
+        fill  = "white",
+        stroke = 1.2,
+        size = 2
+      )
+    )
+  ) +
+  
+  # X-axis label formatting
+  scale_x_discrete(
+    labels = c(
+      "-Biotin"    = expression("\u2013Biotin"),
+      "-Cobalamin" = expression("\u2013B"[12]),
+      "-Thiamine"  = expression("\u2013Thiamine"),
+      "Replete"    = "Replete"
+    )
+  ) +
+  
+  scale_y_continuous(labels = comma) +
+  
+  # Theme
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 16, color = "black"),
+  
+    axis.title.y = element_text(size = 22),
+    axis.title.x = element_text(size = 20, margin = margin(t = 10)),
+    strip.text.x = element_text(size = 18),
+    legend.title = element_text( size = 20, color = "black"),
+    legend.text = element_text( size = 16, color = "black"),
+    legend.position = "none",
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt")
+  ) +
+  guides(color = "none", fill = "none", shape = "none")+
+coord_cartesian(ylim = c(0, 10000)) 
+
+# Print plot
+max_bio_LD
+```
+
+## Specific growth rates using all_easylinear
+
+Specific Growth Rates Biotin trial 1 using all_easylinear:
+```{r}
+bio1 <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% c(1) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+bio_lin1 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, bio1, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(bio_lin1, log = "y")
+
+summary(bio_lin1)
+coef(bio_lin1)
+rsquared(bio_lin1)
+```
+
+Specific Growth Rates Biotin trial 2 using all_easylinear
+```{r}
+bio2 <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% c(2) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+bio_lin2 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, bio2, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(bio_lin2, log = "y")
+
+summary(bio_lin2)
+coef(bio_lin2)
+rsquared(bio_lin2)
+```
+
+Specific Growth Rates Biotin trial 3 using all_easylinear:
+```{r}
+bio3 <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% c(3) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+bio_lin3 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, bio3, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(bio_lin3, log = "y")
+
+summary(bio_lin3)
+coef(bio_lin3)
+rsquared(bio_lin3)
+```
+
+Specific Growth Rates Biotin trial 4 using all_easylinear
+```{r}
+bio4 <- fluor %>%
+  filter(Treatment == "-Biotin", Round %in% c(4) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+bio_lin4 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, bio4, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(bio_lin4, log = "y")
+
+summary(bio_lin4)
+coef(bio_lin4)
+rsquared(bio_lin4)
+```
+
+Specific Growth Rates Thiamine trial 1 using all_easylinear:
+```{r}
+thia1 <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% c(1) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin1 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia1, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(thia_lin1, log = "y")
+
+summary(thia_lin1)
+coef(thia_lin1)
+rsquared(thia_lin1)
+```
+
+Specific Growth Rates Thiamine trial 2 using all_easylinear
+```{r}
+thia2 <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% c(2) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin2 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia2, h = 9, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(thia_lin2, log = "y")
+
+summary(thia_lin2)
+coef(thia_lin2)
+rsquared(thia_lin2)
+```
+
+Specific Growth Rates Thiamine trial 3 using all_easylinear:
+```{r}
+thia3 <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% c(3) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin3 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia3, h = 9, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(thia_lin3, log = "y")
+
+summary(thia_lin3)
+coef(thia_lin3)
+rsquared(thia_lin3)
+```
+
+Specific Growth Rates Thiamine trial 4 using all_easylinear
+```{r}
+thia4 <- fluor %>%
+  filter(Treatment == "-Thiamine", Round %in% c(4) )%>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+thia_lin4 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, thia4, h = 9, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(thia_lin4, log = "y")
+
+summary(thia_lin4)
+coef(thia_lin4)
+rsquared(thia_lin4)
+```
+
+Specific Growth Rates Replete trial 1 using all_easylinear:
+```{r}
+rep1 <- fluor %>%
+  filter(Treatment == "Replete", Round %in% c(1)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+rep_lin1 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, rep1, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(rep_lin1, log = "y")
+
+summary(rep_lin1)
+coef(rep_lin1)
+rsquared(rep_lin1)
+
+```
+
+Specific Growth Rates Replete trial 2 using all_easylinear:
+```{r}
+rep2 <- fluor %>%
+  filter(Treatment == "Replete", Round %in% c(2)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+rep_lin2 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, rep2, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(rep_lin2, log = "y")
+
+summary(rep_lin2)
+coef(rep_lin2)
+rsquared(rep_lin2)
+```
+
+Specific Growth Rates Replete trial 3 using all_easylinear
+```{r}
+rep3 <- fluor %>%
+  filter(Treatment == "Replete", Round %in% c(3)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+rep_lin3 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, rep3, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(rep_lin3, log = "y")
+
+summary(rep_lin3)
+coef(rep_lin3)
+rsquared(rep_lin3)
+```
+
+Specific Growth Rates Replete trial 4 using all_easylinear:
+```{r}
+rep4 <- fluor %>%
+  filter(Treatment == "Replete", Round %in% c(4)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+rep_lin4 <- all_easylinear(Chl ~ Time|Round+Treatment+Rep, rep4, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(rep_lin4, log = "y")
+
+summary(rep_lin4)
+coef(rep_lin4)
+rsquared(rep_lin4)
+```
+
+Combine all specific growth rate values from each treatment:
+```{r}
+extract_results <- function(model, treatment_name) {
+  coefs <- coef(model)
+  r2vals <- rsquared(model)
+  
+  df <- as.data.frame(coefs) %>%
+    tibble::rownames_to_column("Group") %>%
+    mutate(
+      Treatment = treatment_name,
+      r2 = r2vals
+    ) %>%
+    # Split "Group" into Round and Rep (Group looks like "1:-Thiamine:2")
+    tidyr::separate(Group, into = c("Round", "Treatment_label", "Rep"), sep = ":", remove = FALSE) %>%
+    mutate(Round = as.integer(Round))
+  
+  return(df)
+}
+
+# --- Extract Biotin rounds ---
+df_bio1 <- extract_results(bio_lin1, "-Biotin")
+df_bio2 <- extract_results(bio_lin2, "-Biotin")
+df_bio3 <- extract_results(bio_lin3, "-Biotin")
+df_bio4 <- extract_results(bio_lin4, "-Biotin")
+df_bio <- bind_rows(df_bio1, df_bio2, df_bio3, df_bio4)
+
+# --- Extract Thiamine rounds ---
+df_thia1 <- extract_results(thia_lin1, "-Thiamine")
+df_thia2 <- extract_results(thia_lin2, "-Thiamine")
+df_thia3 <- extract_results(thia_lin3, "-Thiamine")
+df_thia4 <- extract_results(thia_lin4, "-Thiamine")
+df_thia <- bind_rows(df_thia1, df_thia2, df_thia3, df_thia4)
+
+# --- Extract Replete rounds ---
+df_rep1 <- extract_results(rep_lin1, "Replete")
+df_rep2 <- extract_results(rep_lin2, "Replete")
+df_rep3 <- extract_results(rep_lin3, "Replete")
+df_rep4 <- extract_results(rep_lin4, "Replete")
+df_rep <- bind_rows(df_rep1, df_rep2, df_rep3, df_rep4)
+
+# --- Combine all treatments ---
+all_lin_results <- bind_rows(df_bio, df_thia, df_rep)
+
+# Optional: ensure Round is treated as a factor
+all_lin_results$Round <- factor(all_lin_results$Round)
+```
+
+Run an ANOVA on specific growth rate values and Tukey HSD post-hoc test for treatment:
+```{r}
+all_lin_results$Round <- factor(all_lin_results$Round)
+linear <- aov(mumax ~ Treatment , data = all_lin_results)
+summary(linear)
+TukeyHSD(linear)
+```
+
+Plot specific growth rates for Pyro grown in -Thiamine, -Biotin, and Replete: 
+```{r}
+all_lin_results$Treatment <- factor(
+  all_lin_results$Treatment,
+  levels = c("-Cobalamin",  "-Thiamine", "-Biotin","Replete")
+)
+
+mu <- ggplot(all_lin_results, aes(x = Treatment, y = mumax, color = Treatment)) +
+  # Raw points
+  geom_point(size = 3, shape = 16, position = position_jitter(width = 0.1)) +
+  # Mean ± SE
+  stat_summary(fun = mean, geom = "point", shape = 1, size = 5, stroke = 1.2) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2) +
+  scale_color_manual(values = c(
+    "-Cobalamin" = "#102E50",
+    "Replete"    = "#F5C45E",
+    "-Thiamine"  = "deeppink4",
+    "-Biotin"    = "#667028"
+  )) +
+  scale_x_discrete(labels = c(
+    "-Cobalamin" = expression("\u2212B"[12]),
+    "Replete"    = "Replete",
+    "-Thiamine"  = expression("\u2212Thiamine"),
+    "-Biotin"    = expression("\u2212Biotin")
+  )) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    axis.title = element_text( size = 20),
+    axis.text = element_text( size = 20, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text( size = 20, color = "black"),
+    legend.title = element_blank(),
+    legend.text = element_blank(),
+    legend.key = element_blank()
+  ) +
+    labs(
+      x = "Media Treatment",
+      y = expression(paste("(", mu, ") RFU" * "\u00B7" * "day"^-1, " "))
+    ) + guides(color = "none", fill = "none", shape = "none")
+
+mu
+```
+
+## Figure 3
+```{r fig.width=8, fig.height=10}
+bo <- 
+  LD_OTB_all_growth / 
+  (max_bio_LD +
+   mu ) +
+  plot_layout(guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    panel.spacing = unit(.1, "lines"),
+    plot.margin = margin(15, 15, 15, 15),
+    axis.title.y = element_text(margin = margin(r = 12)),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    legend.margin = margin(t = 4, b = 4),
+    legend.box.margin = margin(5, 5, 5, 5),
+    axis.text.x = element_text(size = 16),
+    
+  )
+bo
+```
+
+# P. bahamense grown in five B12 concentrations
+Chlorophyll-a fluorescence (RFU) data from P. bahamense cultures were used to  visualize growth patterns, quantify maximum biomass, and estimate specific growth rates under media conditions deficient in media lacking one targeted B vitamin. Specific growth rates were computed using the  “alleasy_linear” function of the “growthrates” package in R Studio (Hall et al., 2014; RStudio Team, 2020).
+
+Import and Parse the Dataset:
+```{r import data}
+b12 <-as.data.frame(read_csv("b12_levels.csv")) 
+# Remove periods and convert to numeric
+b12$Time <- as.numeric(sub("T", "", b12$Time))
+# Convert Date column to Date type
+b12$Date <- mdy(b12$Date)
+b12$Treatment <- unlist(b12$Treatment)
+#covert timepoints to hours
+b12$Time <- b12$Time * 48    # hours
+b12$Time <- b12$Time / 24
+
+# put treatment level in desired order
+b12 <- b12 %>%
+  mutate(Treatment = factor(Treatment, levels = c(
+    "369pM",    # Place the levels in desired order
+    "36pM",
+    "3.69pM",
+    "0.369pM",
+    "0.0369pM"
+  )))
+
+```
+
+Prepare data for plotting: 
+```{r}
+levels_order <- c("0.0369pM", "0.369pM", "3.69pM", "36pM", "369pM")
+b12$Treatment <- factor(b12$Treatment, levels = levels_order)
+
+# Named color palette
+pp_palette <- c(
+  "0.0369pM" = "lightblue",
+  "0.369pM"  = "#99c2e6",
+  "3.69pM"   = "#66a3d2",
+  "36pM"     = "#3380bf",
+  "369pM"    = "#004080"
+)
+```
+
+## Visulaize growth
+```{r}
+growth <- ggplot(b12, aes(x = Time, y = `Chlorophyll-A (RFU)`, color = Treatment)) +
+  geom_point() +
+  geom_smooth(aes(color = Treatment), se = FALSE) +
+  facet_grid(Round ~ Treatment) +
+  labs(
+    x = "Time (days)",
+    y = expression(paste("Chlorophyll-", italic("a"), " fluorescence (RFU)"))
+  ) +
+  
+ 
+   scale_y_continuous(labels = scales::comma) +
+
+
+  scale_color_manual(values = pp_palette) +
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(size = 12, color = "black"),
+    axis.title.y = element_text(size = 20, margin = margin(t = 10)),
+    axis.title.x = element_text(size = 20, margin = margin(t = 10)),
+    strip.text.x = element_text(size = 16),
+    strip.text = element_text( size = 16, color = "black"),
+    legend.title = element_text( size = 16, color = "black"),
+    legend.text = element_text( size = 16, color = "black"),
+    legend.position = "bottom",
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt"),
+    panel.spacing = unit(.15, "cm")
+  )
+
+growth
+```
+
+## Calculate maximum RFU values for each round and medium treatment
+```{r max biomass reached in each B12 concentration}
+max_bio <- b12  %>%
+  filter(Treatment %in% c(Treatment, levels = c("369pM", "36pM", "3.69pM", "0.369pM", "0.0369pM"))) %>%
+  group_by(Treatment, Bio_Rep) %>% 
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE)) %>%
+  ungroup()
+
+print(max_bio)
+```
+
+Run an ANOVA followed by a Tukey HSD test for the treatment factor
+```{r}
+result<- aov(Max_Chl~Treatment, max_bio)
+summary(result)
+
+TukeyHSD(result)
+```
+
+Plot maximum biomass:
+```{r plot max biomass}
+# Define factor levels (low to high B12)
+levels_order <- c("0.0369pM", "0.369pM", "3.69pM", "36pM", "369pM")
+max_bio$Treatment <- factor(trimws(max_bio$Treatment), levels = levels_order)
+
+# Calculate summary statistics
+summary_stats <- max_bio %>%
+  group_by(Treatment) %>%
+  summarise(
+    mean_chl = mean(Max_Chl, na.rm = TRUE),
+    sd_chl   = sd(Max_Chl, na.rm = TRUE),
+    .groups = "drop"
+  )
+summary_stats$Treatment <- factor(summary_stats$Treatment, levels = levels_order)
+
+# Define color palette
+pp_palette <- c(
+  "0.0369pM" = "lightblue",
+  "0.369pM"  = "#99c2e6",
+  "3.69pM"   = "#66a3d2",
+  "36pM"     = "#3380bf",
+  "369pM"    = "#004080"
+)
+
+
+
+
+max_bio_plot <- ggplot(summary_stats, aes(x = Treatment)) +
+  
+  # Replicate points
+  geom_point(
+    data = max_bio,
+    aes(y = Max_Chl, color = Treatment),
+    size = 3,
+    alpha = 1,
+    position = position_jitter(width = 0.1)
+  ) +
+  
+ stat_summary(
+  data = max_bio,
+  aes(y = Max_Chl, color = Treatment),
+  fun = mean,
+  geom = "point",
+  shape = 1,
+  size = 5,
+  stroke = 1.2
+) +
+
+stat_summary(
+  data = max_bio,
+  aes(y = Max_Chl, color = Treatment),
+  fun.data = mean_sdl,
+  fun.args = list(mult = 1),
+  geom = "errorbar",
+  width = 0.2
+)+
+  
+  # Keep your palette but remove the scale (so no legend)
+  scale_color_manual(values = pp_palette, guide = "none") +
+  
+  scale_y_continuous(labels = scales::comma) +
+  
+  coord_cartesian(ylim = c(0, 10000)) +
+  
+  ylab(expression(paste("Maximum RFU"))) +
+  xlab(expression(B[12]~Concentration~"(pM)")) +
+  
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(size = 20, color = "black", angle = 45, hjust = 1),
+    axis.title.y = element_text(size = 20),
+    axis.title.x = element_text(size = 20),
+    legend.position = "none",
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt")
+  )
+
+max_bio_plot
+```
+
+## Specific growth rates using all_easylinear
+
+Remove outliers:
+```{r}
+# ️⃣ Compute T0 baseline per replicate, treatment, and round
+baseline <- aggregate(
+  `Chlorophyll-A (RFU)` ~ Bio_Rep + Treatment + Round,
+  data = subset(b12, Time == 0),
+  FUN = mean,
+  na.rm = TRUE
+)
+names(baseline)[names(baseline) == "Chlorophyll-A (RFU)"] <- "Chl_T0"
+
+# Merge baseline back into the full dataset
+b12_merged <- merge(b12, baseline, by = c("Bio_Rep", "Treatment", "Round"), all.x = TRUE)
+
+#  Keep all T0 points, and remove any post-T0 points where replicate < its T0
+b12_clean <- subset(
+  b12_merged,
+  Time == 0 | `Chlorophyll-A (RFU)` >= Chl_T0
+)
+```
+
+Specific growth rate with all easy linear for 0.0369PM:
+```{r}
+pM_1 <- b12_clean %>%
+  filter(
+    Treatment %in% c("0.0369pM"),
+    Round %in% c(1)
+  ) %>%                     
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+mu1 <- all_easylinear(Chl ~ Time | Round + Treatment + Bio_Rep, pM_1, h =4, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(mu1, log = "y")
+
+summary(mu1)
+coef(mu1)
+rsquared(mu1)
+
+#not significant slopes
+
+```
+
+Specific growth rate with all easy linear for 0.369pM:
+```{r}
+pM_2 <- b12_clean %>%
+  filter(Treatment %in% c("0.369pM"),
+         Round %in% c(1),
+         Time >= 0) %>%  # <-- exclude T0
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+mu2 <-all_easylinear(Chl ~ Time|Treatment+Bio_Rep, pM_2, h = 4, quota = 1)
+
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(mu2, log = "y")   # line only
+
+
+summary(mu2)
+coef(mu2)
+rsquared(mu2)
+#not significant slopes
+```
+
+Specific growth rate with all easy linear for 3.69PM:
+```{r}
+pM_3 <- b12_clean %>%
+  filter(Treatment %in% c("3.69pM"),
+         Round %in% c(1),
+         Time >= 0) %>%  
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+
+mu3 <-all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, pM_3, h =5, quota = 1)
+
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(mu3 , log = "y")
+
+summary(mu3)
+coef(mu3)
+rsquared(mu3)
+```
+
+Specific growth rate with all easy linear for 36PM:
+```{r}
+pM_4 <- b12_clean %>% 
+  filter(Treatment %in% c("36pM"),
+         Round %in% c(1),
+         Time >= 0) %>%  # <-- exclude T0
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+
+mu4 <-all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, pM_4, h = 5, quota = 1)
+
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(mu4 , log = "y")
+
+summary(mu4)
+coef(mu4)
+rsquared(mu4)
+```
+
+Specific growth rate with all easy linear for 369PM:
+```{r}
+pM_5 <- b12_clean %>% 
+  filter(Treatment %in% c("369pM"),
+         Round %in% c(1),
+         Time >= 0) %>% 
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+mu5 <-all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, pM_5, h = 5, quota = 1)
+
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(mu5 , log = "y")
+
+summary(mu5)
+coef(mu5)
+rsquared(mu5)
+```
+
+Make dataframe with fits:
+```{r}
+  make_df <- function(model, round_num, experiment_name) {
+  coefs <- coef(model)
+  
+  if (is.matrix(coefs)) {
+    df <- as.data.frame(coefs) %>%
+      tibble::rownames_to_column("Group") %>%
+      mutate(
+        Round = round_num,
+        Experiment = experiment_name,
+        r2 = rsquared(model)
+      )
+  } else {
+    df <- data.frame(
+      Group = names(coefs),
+      Estimate = as.numeric(coefs),
+      Round = round_num,
+      Experiment = experiment_name,
+      r2 = rep(rsquared(model), length(coefs))
+    )
+  }
+  
+  return(df)
+}
+
+# Example usage for your single fits
+df1 <- make_df(mu1, 1, "0.0369pM")
+df2 <- make_df(mu2, 1, "0.369pM")
+df3 <- make_df(mu3, 1, "3.69pM")
+df4 <- make_df(mu4, 1, "36pM")
+df5 <- make_df(mu5, 1, "369pM")
+
+# Combine all results
+all_results <- bind_rows(df1, df2, df3, df4, df5)
+
+# Check
+all_results
+```
+
+ANOVA and post-hoc multiple comparisons of mumax among varying media treatments:
+```{r}
+aov_result <- aov(mumax ~ Experiment, data = all_results)
+summary(aov_result)
+# Post-hoc Tukey test
+TukeyHSD(aov_result)
+
+```
+
+T-test between 0.0369pM and all other concentrations:
+```{r}
+all_results$Group <- ifelse(all_results$Experiment == "0.0369pM", 
+                            "A", 
+                            "B")
+all_results$Group <- factor(all_results$Group)
+
+t.test(mumax~ Group, data = all_results)
+```
+
+Plot mumax with all easy linear data:
+```{r}
+# Define the order of treatments from least to greatest
+levels_order <- c("0.0369pM", "0.369pM", "3.69pM", "36pM", "369pM")
+
+# Convert Treatment column to a factor with this order
+all_results$Experiment <- factor(all_results$Experiment, levels = levels_order)
+
+# calculate standard deviation and mean 
+b12_summary <- all_results %>%
+  group_by(Experiment) %>%
+  summarise(
+    mean_mumax = mean(mumax, na.rm = TRUE),
+    se_mumax   = sd(mumax, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+mu_b12 <- ggplot(all_results, aes(x = Experiment, y = mumax, color = Experiment)) +
+  
+  # Raw replicate points (jittered)
+  geom_point(size = 3, shape = 16, 
+             position = position_jitter(width = 0.1), alpha = 1) +
+  
+  # Mean per Experiment+Round (open circle)
+  stat_summary(fun = mean, geom = "point", shape = 1, size = 5, stroke = 1.2)  +
+  
+  # Error bars (standard error)
+  stat_summary(fun.data = mean_se, geom = "errorbar",
+               width = 0.2) +
+  
+  # Color palette — WITH legend removed
+  scale_color_manual(
+    values = c(
+      "0.0369pM" = "lightblue",
+      "0.369pM"  = "#99c2e6",
+      "3.69pM"   = "#66a3d2",
+      "36pM"     = "#3380bf",
+      "369pM"    = "#004080"
+    ),
+    guide = "none"   # ← THIS removes the legend safely
+  ) +
+
+  # Safe visible range
+  coord_cartesian(ylim = c(0, 0.4)) +
+  
+  # Labels + theme
+  labs(
+    x = expression(B[12]~Concentration~"(pM)"),
+    y = expression(paste(mu, " (RFU" %*% "day"^-1, ")"))
+  ) +
+  
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(size = 20, color = "black", angle = 45, hjust = 1),
+    strip.text = element_text(size = 20, color = "black"),
+
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt")
+  )
+
+mu_b12
+```
+
+## Figure 4
+```{r fig.width=8, fig.height=10}
+# Ensure BOTH subplots have no legend inside patchwork
+max_bio_nl <- max_bio_plot + theme(legend.position = "none")
+mu_nl      <- mu_b12 + theme(legend.position = "none")
+
+# Build the layout
+bo <- 
+  (
+    growth /                
+    (max_bio_nl | mu_nl)    
+  ) +
+  plot_layout(
+    widths = c(4, 2),        # your original width ratio
+    guides = "collect"        # ← THIS is what actually gathers one legend
+  ) &
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    panel.spacing = unit(0.4, "lines"),
+    plot.margin = margin(15, 15, 15, 15),
+    axis.title.y = element_text(margin = margin(r = 12)),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    legend.margin = margin(t = 4, b = 4),
+    legend.box.margin = margin(5, 5, 5, 5),
+    legend.ticks = element_blank(),
+    axis.text.x = element_text(size = 16)
+  )
+
+bo
+```
+
+# P. bahamense recruitment experiments
+
+Low-diveristy P. bahamense culture was co-cultured with bacteria recruited from OTB (Old Tampa Bay) water, Indian River Lagoon (IRL) culture, and IRL surface seawater and grown in replete media and media missing B12
+
+Import data:
+
+OTB water:
+```{r}
+OTB <- as.data.frame(read_csv("OTB_1006.csv"))
+
+OTB$Time <- as.numeric(sub('.', '', OTB$Time))
+OTB$Date <- ymd(OTB$Date)
+OTB$Time <- OTB$Time * 48
+
+OTB %<>%
+  filter(Treatment %in% c("-Cobalamin", "Replete")) %>%
+  mutate(Treatment = factor(Treatment, levels = c("-Cobalamin", "Replete")))
+
+OTB$Time_in_Days <- OTB$Time / 24
+```
+
+
+IRL water:
+```{r}
+IRLrec<-as.data.frame(read_csv("IRL_1006.csv"))
+IRLrec$Time <- as.numeric(sub('.', '', IRLrec$Time))
+IRLrec$Date <- ymd(IRLrec$Date)
+IRLrec$Time <- IRLrec$Time * 48
+IRLrec$Time_in_Days <- IRLrec$Time / 24  # Convert Time from hours to days
+```
+
+IRL culture:
+```{r}
+IRLcul <- as.data.frame(read_csv("1003_1006.csv"))
+IRLcul$Time <- as.numeric(gsub("\\.", "", IRLcul$Time))  # Remove all periods
+IRLcul$Date <- ymd(IRLcul$Date)
+IRLcul$Time <- IRLcul$Time * 48
+IRLcul$Time_in_Days <- IRLcul$Time / 24 
+```
+
+Combine all datasets into one with a new 'Dataset' column:
+```{r spread of biomass}
+all_experiments <- bind_rows(
+  fluor %>% mutate(Dataset = "Low Diversity OTB"),
+  IRLcul %>% mutate(Dataset = "IRL culture microbiome"),
+  OTB %>% mutate(Dataset = "OTB water microbiome"),
+  IRLrec %>% mutate(Dataset = "IRL water microbiome")
+) %>%mutate(
+  Treatment = recode(Treatment,
+                     "-Cobalamin" = "\u2013B12",
+                     "-Biotin" = "\u2013Biotin",
+                     "-Thiamine" = "\u2013Thiamine"),
+  Treatment = factor(Treatment, levels = c("\u2013B12", "Replete"))
+) %>%
+  filter(Round %in% c(1, 2), Treatment %in% c("\u2013B12", "Replete"))
+```
+
+## Visulaize growth of P. bahamense with recruited bacteria
+```{r}
+# Filter out "Low Diversity OTB"
+all_experiments_filtered <- all_experiments %>%
+  filter(Dataset != "Low Diversity OTB") %>%
+  mutate(
+    Treatment = recode(Treatment,
+                       "–B12" = "—B12",  # convert en dash to em dash
+                       "Replete" = "Replete"),
+    Treatment = factor(Treatment, levels = c("—B12", "Replete")),
+    Dataset = factor(Dataset, levels = c(
+      "IRL culture microbiome",
+      "OTB water microbiome",
+      "IRL water microbiome"
+    ))
+  )
+
+growth <- ggplot(all_experiments_filtered, aes(x = Time_in_Days, y = `Chlorophyll-A (RFU)`, color = Treatment)) +
+  geom_point(size = 3) +
+  geom_smooth(se = FALSE) +
+  scale_color_manual(values = c("—B12" = "#102E50", "Replete" = "#F5C45E")) +
+  facet_grid(Round ~ Dataset) +
+  labs(
+    x = "Time (days)",
+    y = expression(paste("Chlorophyll-", italic("a"), " fluorescence (RFU)"))
+  ) +
+  scale_y_continuous(labels = label_comma()) +
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.text.x = element_text(size = 12, color = "black"),
+    axis.title.y = element_text(size = 20, margin = margin(t = 10)),
+    axis.title.x = element_text(size = 20, margin = margin(t = 10)),
+    strip.text.x = element_text(size = 20),
+    strip.text = element_text(size = 20, color = "black"),
+    legend.title = element_text(size = 16, color = "black"),
+    legend.text = element_text(size = 16, color = "black"),
+    legend.position = "bottom",
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt"),
+    panel.spacing = unit(.1, "cm") ) +
+  coord_cartesian(ylim = c(0, 5000))
+
+plot(growth)
+```
+
+Create new variable for experimemt and combine experimental data into dataframe:
+```{r}
+fluor$Experiment <- "fluor"  
+IRLcul$Experiment <- "IRLcul"  
+OTB$Experiment <- "OTB"  
+IRLrec$Experiment <- "IRLwat"  
+all_exp <- bind_rows(fluor, IRLcul, OTB, IRLrec) %>%filter(Round %in% c(1, 2, 3,4)) %>%
+  filter(Treatment %in% c("-Cobalamin", "Replete")) 
+```
+
+## Calculate maximum RFU values for each round and medium treatment
+```{r}
+max_bio <- all_exp %>%
+  group_by(Treatment,  Bio_Rep,Experiment, Round) %>%
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE), .groups = "drop") %>%
+  arrange(Treatment,  Bio_Rep)
+print(max_bio)
+```
+
+Plot maximum biomass
+```{r}
+# Define experiment order
+experiment_order <- c("fluor", "IRLcul", "OTB", "IRLwat")
+
+# Filter and prepare data for -Cobalamin only
+plot_data <- max_bio %>%
+  filter(Treatment == "-Cobalamin") %>%
+  mutate(Experiment = factor(Experiment, levels = experiment_order))
+# 
+# plot_summary <- summary_stats %>%
+#   filter(Treatment == "-Cobalamin") %>%
+#   mutate(Experiment = factor(Experiment, levels = experiment_order))
+
+# Build plot
+max_bio_plot <- ggplot(plot_data, aes(x = Experiment, y = Max_Chl, color = Treatment)) +
+
+  # Raw replicate points (solid)
+  geom_point(size = 5, shape = 16, alpha = 1,
+             position = position_jitter(width = 0.15)) +
+
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 1,
+    size = 5,
+    stroke = 1.2
+  ) +
+  
+  # Error bars: mean ± SD  (NOT SE)
+  stat_summary(
+    fun.data = mean_sdl,
+    fun.args = list(mult = 1),   # 1 SD above/below mean
+    geom = "errorbar",
+    width = 0.2
+  ) +
+
+  # Legend with open circle
+  scale_color_manual(
+    values = c("-Cobalamin" = "#102E50"),
+    labels = c("-Cobalamin" = expression("—B"[12])),
+    name = "Treatment",
+    guide = guide_legend(
+      override.aes = list(
+        shape = 21,
+        fill = "white",   # open circle in legend
+        stroke = 1.2,
+        size = 5
+      )
+    )
+  ) +
+
+  # Axis labels
+  labs(
+    x = "Source",
+    y = expression(paste("Maximum RFU"))
+  ) +
+
+  # X-axis labels
+  scale_x_discrete(labels = c(
+    fluor = "Low Diversity",
+    IRLcul = "IRL Culture",
+    OTB = "OTB Seawater",
+    IRLwat = "IRL Seawater"
+  )) +
+
+  # Y-axis formatting
+  scale_y_continuous(labels = label_comma()) +
+
+  # # Facet by Round
+  # facet_grid(~Round) +
+
+  # Theme
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14, color = "black"),
+    axis.title.y = element_text(size = 20),
+    axis.title.x = element_text(size = 20, margin = margin(t = 10)),
+    strip.text.x = element_text(size = 20),
+    strip.text = element_text(size = 20, color = "black"),
+    legend.title = element_text(size = 16, color = "black"),
+    legend.text = element_text(size = 16, color = "black"),
+    legend.position = "bottom",
+    legend.key.size = unit(1.5, "cm"),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt")
+  ) +
+
+  # Set visible y-axis range safely
+  coord_cartesian(ylim = c(50, 1500))
+
+# Print plot
+max_bio_plot
+
+```
+
+Run an ANOVA followed by a Tukey HSD test for the experiment factor:
+```{r}
+max_B12 <- all_exp %>%
+  group_by(Experiment ,Treatment, Round, Bio_Rep) %>% 
+  summarise(Max_Chl = max(`Chlorophyll-A (RFU)`, na.rm = TRUE)) %>%
+  ungroup()  %>% filter(Treatment %in% c("-Cobalamin"))
+
+
+aov_biomass <- aov(Max_Chl ~ Experiment, data =max_B12)
+summary(aov_biomass)
+TukeyHSD(aov_biomass)
+```
+
+## Specific growth rates using all_easylinear
+
+Remove outliers from IRL culture data:
+outliers are considered values the drop below T0 RFU values 
+```{r}
+# Compute T0 baseline per replicate, treatment, and round
+baseline <- aggregate(
+  `Chlorophyll-A (RFU)` ~ Bio_Rep + Treatment + Round,
+  data = subset(IRLcul, Time == 0),
+  FUN = mean,
+  na.rm = TRUE
+)
+names(baseline)[names(baseline) == "Chlorophyll-A (RFU)"] <- "Chl_T0"
+
+# Merge baseline back into the full dataset
+IRLcul_merged <- merge(IRLcul, baseline, by = c("Bio_Rep", "Treatment", "Round"), all.x = TRUE)
+
+# Keep all T0 points, and remove any post-T0 points where replicate < its T0
+IRLcul_clean <- subset(
+  IRLcul_merged,
+  Time == 0 | `Chlorophyll-A (RFU)` >= Chl_T0
+)
+```
+
+IRL culture trial 1 Replete:
+```{r}
+IRLcul_mumax <- IRLcul_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(1),
+         Time >= 0) %>%  # <-- exclude T0
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+IRLcul1 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRLcul_mumax, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(IRLcul1 , log = "y")
+
+
+summary(IRLcul1 )
+coef(IRLcul1 )
+rsquared(IRLcul1)
+```
+
+IRL culture trial 2 Replete:
+```{r}
+IRLcul_mumax2 <- IRLcul_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(2),
+         Time >= 0) %>% 
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+IRLcul2 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRLcul_mumax2, h =7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(IRLcul2 , log = "y")
+
+
+summary(IRLcul2 )
+coef(IRLcul2 )
+rsquared(IRLcul2)
+
+```
+
+Remove outliers from OTB water data:
+```{r}
+# Compute T0 baseline per replicate, treatment, and round
+baseline <- aggregate(
+  `Chlorophyll-A (RFU)` ~ Bio_Rep + Treatment + Round,
+  data = subset(OTB, Time == 0),
+  FUN = mean,
+  na.rm = TRUE
+)
+names(baseline)[names(baseline) == "Chlorophyll-A (RFU)"] <- "Chl_T0"
+
+# Merge baseline back into the full dataset
+OTBwat_merged <- merge(OTB, baseline, by = c("Bio_Rep", "Treatment", "Round"), all.x = TRUE)
+
+# Keep all T0 points, and remove any post-T0 points where replicate < its T0
+OTBwat_clean <- subset(
+  OTBwat_merged,
+  Time == 0 | `Chlorophyll-A (RFU)` >= Chl_T0
+)
+```
+
+OTB water trial 1 Replete:
+```{r}
+OTB_mumax1 <- OTBwat_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(1),
+         Time >= 0) %>% 
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+
+OTBwat1 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, OTB_mumax1, h = 7, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(OTBwat1 , log = "y")
+
+
+summary(OTBwat1)
+coef(OTBwat1)
+rsquared(OTBwat1)
+```
+
+OTB water trial 2 Replete:
+```{r}
+OTB_mumax2 <- OTBwat_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(2),
+         Time >= 0) %>% 
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+
+OTBwat2 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, OTB_mumax2, h = 5, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(OTBwat2  , log = "y")
+
+
+
+summary(OTBwat2)
+coef(OTBwat2)
+rsquared(OTBwat2)
+```
+
+Remove outliers from IRL water data:
+```{r}
+#Compute T0 baseline per replicate, treatment, and round
+baseline <- aggregate(
+  `Chlorophyll-A (RFU)` ~ Bio_Rep + Treatment + Round,
+  data = subset(IRLrec, Time == 0),
+  FUN = mean,
+  na.rm = TRUE
+)
+names(baseline)[names(baseline) == "Chlorophyll-A (RFU)"] <- "Chl_T0"
+
+# Merge baseline back into the full dataset
+IRLwat_merged <- merge(IRLrec, baseline, by = c("Bio_Rep", "Treatment", "Round"), all.x = TRUE)
+
+# Keep all T0 points, and remove any post-T0 points where replicate < its T0
+IRLwat_clean <- subset(
+  IRLwat_merged,
+  Time == 0 | `Chlorophyll-A (RFU)` >= Chl_T0
+)
+```
+
+IRL water trial 1 Replete:
+```{r}
+IRL_mumax1 <- IRLwat_clean %>%
+  filter(Treatment %in% c("Replete"), Round %in% c(1)) %>%
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  droplevels()
+
+IRLwat1 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRL_mumax1, h = 5, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(IRLwat1 , log = "y")
+
+
+
+
+summary(IRLwat1)
+coef(IRLwat1)
+rsquared(IRLwat1)
+
+```
+
+IRL water trial 2 Replete:
+```{r}
+IRL_mumax2 <- IRLwat_clean %>%
+  filter(Treatment %in% c("Replete"),
+         Round %in% c(2),
+         Time >= 0) %>%  # <-- exclude T0
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+IRLwat2 <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRL_mumax2, h =6, quota = 1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(IRLwat2 , log = "y")
+
+summary(IRLwat2)
+coef(IRLwat2)
+rsquared(IRLwat2)
+```
+
+IRL water trial 1 -B12:
+```{r}
+IRL_mumax1_b <- IRLwat_clean %>%
+  filter(Treatment %in% c("-Cobalamin"),
+         Round %in% c(1),
+         Time >= 0) %>%  # <-- exclude T0
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+IRLwat1_b <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRL_mumax1_b, h = 4, quota =1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(IRLwat1_b , log = "y")
+
+summary(IRLwat1_b)
+coef(IRLwat1_b)
+rsquared(IRLwat1_b)
+
+
+```
+
+IRL water trial 2 -B12:
+```{r}
+IRL_mumax2_b <-  IRLwat_clean %>%
+  filter(Treatment %in% c("-Cobalamin"),
+         Round %in% c(2),
+         Time >= 0) %>%  
+  rename(Chl = `Chlorophyll-A (RFU)`) %>%
+  arrange(Time, Bio_Rep)
+
+IRLwat2_b <- all_easylinear(Chl ~ Time|Round+Treatment+Bio_Rep, IRL_mumax2_b, h =5, quota =1)
+
+par(mfrow = c(3, 3))
+par(mar = c(2, 2, 2, 1))
+plot(IRLwat2_b , log = "y")
+
+summary(IRLwat2_b)
+coef(IRLwat2_b)
+rsquared(IRLwat2_b)
+```
+
+Extract and combine all specific growth rates:
+```{r}
+# Helper function to handle matrix or vector coefficients
+make_df <- function(model, round_num, experiment_name) {
+  coefs <- coef(model)
+  
+  if (is.matrix(coefs)) {
+    df <- as.data.frame(coefs) %>%
+      tibble::rownames_to_column("Group") %>%
+      mutate(
+        Round = round_num,
+        Experiment = experiment_name,
+        r2 = rsquared(model)
+      )
+  } else {
+    df <- data.frame(
+      Group = names(coefs),
+      Estimate = as.numeric(coefs),
+      Round = round_num,
+      Experiment = experiment_name,
+      r2 = rep(rsquared(model), length(coefs))
+    )
+  }
+  
+  return(df)
+}
+
+# Create data frames for all models with experiment names
+df1 <- make_df(IRLcul1, 1, "IRL Culture")
+df2 <- make_df(IRLcul2, 2, "IRL Culture")
+df3 <- make_df(OTBwat1, 1, "OTB Water")
+df4 <- make_df(OTBwat2, 2, "OTB Water")
+df5 <- make_df(IRLwat1, 1, "IRL Water")
+df6 <- make_df(IRLwat2, 2, "IRL Water")
+df7 <- make_df(IRLwat1_b, 1, "IRL Water B")
+df8 <- make_df(IRLwat2_b, 2, "IRL Water B")
+
+# Combine all results
+all_results <- bind_rows(df1, df2, df3, df4, df5, df6, df7, df8)
+
+# Optional: reorder columns
+all_results <- all_results %>%
+  select(Experiment, Round, Group, y0, mumax, r2)
+```
+
+Prepare IRL seawater data for T-test for both trials in -B12 media:
+```{r}
+df5 <- as.data.frame(coef(IRLwat1))
+df5$Round <- 1
+df5$Experiment <- "IRL Water"
+
+df6 <- as.data.frame(coef(IRLwat2))
+df6$Round <- 2
+df6$Experiment <- "IRL Water"
+
+df7 <- as.data.frame(coef(IRLwat1_b))
+df7$Round <- 1
+df7$Experiment <- "IRL Water -B12"
+
+df8 <- as.data.frame(coef(IRLwat2_b))
+df8$Round <- 2
+df8$Experiment <- "IRL Water -B12"
+
+# Combine
+IRLwater <- bind_rows(df5, df6, df7, df8)
+```
+
+T-test between specific growthrates both trials for IRL water in -B12:
+```{r}
+t.test(mumax ~ Experiment, data = IRLwater, var.equal = TRUE)
+```
+
+Plot IRL seawater specific growth rates:
+```{r}
+# Extract the columns needed
+mumax_results <- all_results %>%
+  select(Experiment, Round, Group, mumax) %>%
+  mutate(ExperimentRound = paste(Experiment, Round, sep = "_"))
+
+mumax_results <- mumax_results %>%
+  mutate(
+    Treatment = factor(
+      Experiment,
+      levels = c("IRL Water B", "IRL Water")  # order: B12 first, Replete second
+    )
+  )
+
+# Filter IRL Water only
+mumax_IRLwater <- mumax_results %>%
+  filter(grepl("IRL Water", Experiment))
+
+
+IRL_mu <- ggplot(mumax_IRLwater, aes(x = Treatment, y = mumax, color = Treatment)) +
+  # Raw replicate points
+  geom_point(size = 5, shape = 16, position = position_jitter(width = 0.1)) +
+  
+  # Mean per Experiment+Round (open circle)
+  stat_summary(fun = mean, geom = "point", shape = 1, size = 5, stroke = 1.2) +
+  
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2) +
+  
+  # facet_grid(~Round) +
+  scale_color_manual(values = c(
+    "IRL Water B" = "#102E50",
+    "IRL Water" = "#F5C45E",
+    "-Thiamine" = "deeppink4",
+    "-Biotin" = "#667028"
+  )) +
+  scale_x_discrete(labels = c(
+  "IRL Water B"  = expression("\u2013B"[12]), 
+  "IRL Water"   = "Replete",
+  "-Thiamine"   = expression("\u2013Thiamine"),
+  "-Biotin"     = expression("\u2013Biotin")    
+))+
+  theme_minimal()  +
+
+  theme(
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 20, color = "black"),
+    axis.text.x = element_text( size = 18, color = "black", angle = 45, hjust = 1),
+    strip.text = element_text( size = 20, color = "black"),
+    legend.title = element_blank(),
+    legend.text = element_blank(),
+    legend.key = element_blank(),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt")
+  ) +
+  labs(
+    x = "Media Treatment",
+    y = expression(paste("(", mu, ") RFU" * "\u00B7" * "day"^-1, " "))
+  ) +
+  guides(color = "none", fill = "none", shape = "none") +
+  
+  # Set visible range safely
+  coord_cartesian(ylim = c(0, 0.5)) 
+  
+IRL_mu
+```
+
+
+## Figure 5
+```{r fig.width=8, fig.height=10}
+# Ensure BOTH subplots have no legend inside patchwork
+max_bio__2 <- max_bio_plot + theme(legend.position = "none")
+mu_2      <- IRL_mu + theme(legend.position = "none")
+
+bo <- 
+  growth / 
+  (max_bio_plot  +
+   IRL_mu ) + 
+  plot_layout(
+    guides = "collect",
+    widths = c(4, 2)     
+  ) &
+  theme(
+    legend.position = "bottom",
+    panel.spacing = unit(.1, "lines"),
+    plot.margin = margin(15, 15, 15, 15),
+    axis.title.y = element_text(margin = margin(r = 12)),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    legend.margin = margin(t = 4, b = 4),
+    legend.box.margin = margin(5, 5, 5, 5),
+    axis.text.x = element_text(size = 16)
+  )
+
+bo
+```
+
+# Characterizing P. bahamense recruited bacterial communities
+
+1. Full-length 16S rRNA was sequenced using Oxford Nanopore MinIon v10.4 flow cells (Oxford Nanopore Technology 2008)
+2. Sequence data was processed and classified using Kraken v2.1.2 (Lu and Salzberg 2020)
+
+Import data: 
+```{r}
+Recruit_16s <- read.csv("/Users/lydiaruggles/Desktop/KRAKEN-16s-counts-genus.csv")
+```
+
+```{r}
+# Identify sample columns
+sample_cols <- names(Recruit_16s)[2:(which(names(Recruit_16s) == "total") - 1)]
+
+# Pivot to long data
+Recruit_16s_long <- Recruit_16s %>%
+  pivot_longer(
+    cols = all_of(sample_cols),
+    names_to = "sample",
+    values_to = "count"
+  )
+
+# Separate samples into new columns
+Recruit_16s_long <- Recruit_16s_long %>%
+  separate(sample, into = c("experiment","treatment","filter_size","bio_rep"),
+           sep = "_", remove = FALSE)
+
+# One genus in one sample with the total count of that genus in that sample
+grouped_data1 <- Recruit_16s_long %>%
+  mutate(count = as.numeric(count)) %>%
+  group_by(treatment, experiment, filter_size, bio_rep, genus) %>%
+  summarise(total_count = sum(count), .groups = "drop"
+)
+
+```
+
+Prepare data as wide matrix
+```{r}
+# Pivot wider
+wide_data1 <- grouped_data1 %>%
+  pivot_wider(names_from = genus, values_from = total_count, values_fill = 0)
+
+# Create rownames and remove metadata columns for distance matrix
+rownames(wide_data1) <- paste(wide_data1$treatment, wide_data1$experiment, wide_data1$filter_size, wide_data1$bio_rep, sep = "_")
+
+wide_matrix1 <- wide_data1[, !(names(wide_data1) %in% c("treatment", "experiment", "filter_size", "bio_rep"))]
+wide_matrix1 <- as.data.frame(lapply(wide_matrix1, as.numeric))
+
+wide_matrix1[is.na(wide_matrix1)] <- 0
+
+
+# Bray-Curtis + PCoA
+bray_dist1 <- vegdist(wide_matrix1, method = "bray")
+pcoa_result1 <- pcoa(bray_dist1)
+
+# Build plot data
+pcoa_data1 <- as.data.frame(pcoa_result1$vectors)
+pcoa_data1$treatment <- wide_data1$treatment
+pcoa_data1$experiment <- wide_data1$experiment
+pcoa_data1$filter_size <- as.factor(wide_data1$filter_size)
+```
+
+Permanova:
+```{r}
+#ensure wide matrix is numeric
+wide_matrix1 <- as.data.frame(lapply(wide_matrix1, as.numeric))
+wide_matrix1[is.na(wide_matrix1)] <- 0
+
+#Build the Bray–Curtis distance matrix
+bray_dist <- vegdist(wide_matrix1, method = "bray")
+
+#Bring metadata back in (from wide_data1)
+metadata <- wide_data1[, c("treatment", "experiment", "filter_size", "bio_rep")]
+
+
+permanova_result <- adonis2(
+  bray_dist ~ experiment,
+  data = metadata,
+  permutations = 999
+)
+
+print(permanova_result)
+```
+
+## Figure 6 PCoA plot
+
+```{r}
+sw_pcoa <- ggplot(
+  pcoa_data1,
+  aes(
+    x = Axis.1,
+    y = Axis.2,
+    color = experiment,
+    shape = treatment,
+    alpha = filter_size   # keep as factor
+  )
+) +
+  geom_point(size = 5) +
+  labs(
+    x = paste0("PCoA1 (", round(pcoa_result1$values$Relative_eig[1] * 100, 2), "%)"),
+    y = paste0("PCoA2 (", round(pcoa_result1$values$Relative_eig[2] * 100, 2), "%)"),
+    color = "Experiment",
+    shape = "Treatment",
+    alpha = "Filter size"
+  ) +
+  stat_ellipse(aes(group = experiment)) +
+  scale_color_hue() +
+
+  # Map discrete alpha manually
+  scale_alpha_manual(values = c("02" = 0.4, "10" = 1)) +
+
+  theme_minimal() +
+  theme(
+    legend.key.size = unit(1.5, "cm"),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20),
+    panel.border = element_rect(color = 'black', fill = NA),
+    axis.title.x = element_text(size = 20, color = "black"),
+    axis.title.y = element_text(size = 20, color = "black"),
+    strip.text = element_text(size = 20, color = "black"),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(size = 20, color = "black")
+  ) +
+  geom_hline(yintercept = 0, linetype = "dotted", linewidth = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dotted", linewidth = 0.5) +
+  theme(panel.grid = element_blank())
+
+plot(sw_pcoa)
+```
+
+Prepare data for relative abundance plot:
+```{r}
+#Standardize experiment names
+grouped_data <- grouped_data1 %>%
+  mutate(
+    experiment = case_when(
+      grepl("1003.1006", experiment, ignore.case = TRUE) ~ "1003.1006",
+      grepl("OTB", experiment, ignore.case = TRUE) ~ "OTB.1006",
+      grepl("IRL", experiment, ignore.case = TRUE) ~ "IRL.1006",
+      TRUE ~ experiment
+    ),
+    experiment = factor(experiment,
+                        levels = c("1003.1006", "OTB_seawater", "OTB.1006", "IRL_seawater", "IRL.1006"),
+                        labels = c("Microbiome from IRL culture",
+                                   "OTB Seawater",
+                                   "Microbiome from OTB seawater",
+                                   "IRL seawater",
+                                   "Microbiome from IRL seawater"))
+  )
+
+#Pivot to long format
+sample_cols <- names(Recruit_16s)[2:(which(names(Recruit_16s) == "total") - 1)]
+
+Recruit_16s_long <- Recruit_16s %>%
+  pivot_longer(
+    cols = all_of(sample_cols),
+    names_to = "sample",
+    values_to = "count"
+  ) %>%
+  separate(sample, into = c("experiment","treatment","filter_size","bio_rep"),
+           sep = "_", remove = FALSE) %>%
+  mutate(count = as.numeric(count))  # ensure numeric
+
+# ️ Summarize counts per sample & genus
+grouped_data <- Recruit_16s_long %>%
+  group_by(experiment, treatment, filter_size, bio_rep, order) %>%
+  summarise(total_count = sum(count), .groups = "drop") %>%
+  group_by(experiment, treatment, filter_size, bio_rep) %>%
+  mutate(RA = (total_count / sum(total_count)) * 100) %>%
+  ungroup() %>%
+  filter(treatment %in% c("noB12", "replete", "seawater"))
+
+# ⃣Collapse low abundance genera (<1%) into "z<1% abund."
+grouped_data$order <- as.character(grouped_data$order)
+grouped_data$order [grouped_data$RA < 1] <- "z<1% abund."
+grouped_data$order <- factor(grouped_data$order )  # back to factor
+
+#  Optional: fix experiment & filter labels for plotting
+grouped_data <- grouped_data %>%
+  mutate(
+    experiment = factor(experiment,
+                        levels = c("X1003.1006","OTB","OTB.1006","IRL","IRL.1006"),
+                        labels = c("Recruited IRL culture",
+                                   "OTB Seawater",
+                                   "Recruited OTB seawater",
+                                   "IRL Seawater",
+                                   "Recruited IRL seawater")),
+    Treatment = recode(treatment, "-B12" = "\u2014B12"),
+    filter_size = recode(filter_size, "10" = "10.0um", "02" = "0.2um"),
+    filter_size = factor(filter_size, levels = c("10.0um", "0.2um")),  # <-- top first
+    x_label = paste(Treatment, "Rep", bio_rep, sep = " ")
+  )
+
+#  Define color palette (ensure enough colors for all genera)
+unique_genera <- levels(grouped_data$order )
+# Use your custom palette if available, otherwise RColorBrewer
+library(RColorBrewer)
+n_colors <- length(unique_genera)
+palette_colors <- brewer.pal(min(12, n_colors), "Set3")  # adjust if >12 genera
+if(n_colors > 12) {
+  palette_colors <- colorRampPalette(palette_colors)(n_colors)
+}
+names(palette_colors) <- unique_genera
+```
+
+## Figure 7 Relative abundance plot
+```{r fig.width=16, fig.height=8}
+
+taxa_bar_plot <- ggplot(grouped_data,
+                        aes(x = x_label, y = RA, fill = order)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_grid(filter_size ~ experiment, scales = "free_x") +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    legend.title = element_blank(),
+    axis.text.x = element_text(size = 18, angle = 45, hjust = 1, color = "black"),
+    axis.text.y = element_text(size = 18, color = "black"),
+    axis.title.y = element_text(size = 18),
+    strip.text = element_text(size = 12),
+    legend.text = element_text(size = 18),
+    strip.position = "top"
+  ) +
+  scale_y_continuous() +        # Corrected
+  scale_fill_viridis_d(option = "turbo") +             # Deep distinct colors
+  guides(fill = guide_legend(ncol = 2)) +
+  ylab("Relative Abundance (%)") +
+  labs(x = NULL)
+
+
+taxa_bar_plot
+
+```
