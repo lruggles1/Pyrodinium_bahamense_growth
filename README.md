@@ -18,3 +18,5 @@ IRL_1006.csv - low diversity isolate co-cultured with IRL seawater bacteria
 ## Functions
 plot_growthfunction.R - can be used to plot growth curves 
 
+## Interactive HTML file
+https://lruggles1.github.io/Pyrodinium_bahamense_growth/pyro_growth_meta.html
